@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type BookSummary = { slug: string; title: string; author?: string; sectionCount: number };
+type SectionStat = { id: string; title: string; chars: number };
+type BookSummary = {
+  slug: string;
+  title: string;
+  author?: string;
+  sectionCount: number;
+  totalChars: number;
+  sections: SectionStat[];
+};
 type SectionMeta = { id: string; title: string };
 type BookDetail = { slug: string; title: string; author?: string; sections: SectionMeta[] };
 
@@ -24,10 +32,19 @@ type SessionEvent =
   | { type: "error"; message: string };
 
 type AuditEvent =
-  | { type: "audit_start"; sid: string }
+  | { type: "audit_start"; aid: string; sids: string[]; sectionIds: string[] }
   | { type: "audit_chunk"; text: string }
-  | { type: "audit_done"; report: { raw: string } }
+  | { type: "audit_done"; aid: string; report: { raw: string } }
   | { type: "audit_error"; message: string };
+
+type SessionListItem = {
+  sid: string;
+  bookSlug: string;
+  sectionId: string;
+  learnerId: LearnerId;
+  startedAt: number;
+  status: string;
+};
 
 const CITE_RE = /〔§([\w-]{1,32})(?:[｜|]([^〕\n]{0,120}))?〕/g;
 
@@ -49,6 +66,9 @@ export default function Page() {
   const [auditText, setAuditText] = useState<string>("");
   const [auditing, setAuditing] = useState<boolean>(false);
   const [sessionDone, setSessionDone] = useState<boolean>(false);
+  const [showAuditPanel, setShowAuditPanel] = useState<boolean>(false);
+  const [existingSessions, setExistingSessions] = useState<SessionListItem[]>([]);
+  const [pickedSids, setPickedSids] = useState<Set<string>>(new Set());
   const auditAbortRef = useRef<AbortController | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -80,6 +100,11 @@ export default function Page() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  const currentBookStat = useMemo(
+    () => books.find((b) => b.slug === bookSlug),
+    [books, bookSlug],
+  );
+
   const canStart = useMemo(
     () => Boolean(bookSlug && sectionId && learnerId && !running),
     [bookSlug, sectionId, learnerId, running],
@@ -91,6 +116,7 @@ export default function Page() {
     setSid("");
     setAuditText("");
     setSessionDone(false);
+    setShowAuditPanel(false);
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -147,7 +173,6 @@ export default function Page() {
       case "chunk":
         setMessages((prev) => {
           const copy = prev.slice();
-          // 找最后一条同 actor 同 turn 的消息追加
           for (let i = copy.length - 1; i >= 0; i--) {
             if (copy[i].turn === ev.turn && copy[i].actor === ev.actor) {
               copy[i] = { ...copy[i], text: copy[i].text + ev.text };
@@ -158,7 +183,6 @@ export default function Page() {
         });
         break;
       case "turn_end":
-        // 已通过 chunk 累积完毕，用 text 校正一次防漂移
         setMessages((prev) => {
           const copy = prev.slice();
           for (let i = copy.length - 1; i >= 0; i--) {
@@ -183,16 +207,34 @@ export default function Page() {
     abortRef.current?.abort();
   }
 
-  async function runAudit() {
-    if (!sid) return;
+  async function openAuditPanel() {
+    setShowAuditPanel(true);
+    setPickedSids(sid ? new Set([sid]) : new Set());
+    if (!bookSlug) return;
+    try {
+      const r = await fetch(`/api/sessions?bookSlug=${encodeURIComponent(bookSlug)}`);
+      const d = await r.json();
+      setExistingSessions(d.sessions || []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function runAudit(sids: string[]) {
+    if (sids.length === 0) {
+      setError("请至少选一个会话");
+      return;
+    }
     setAuditText("");
     setAuditing(true);
     setError("");
     const ctrl = new AbortController();
     auditAbortRef.current = ctrl;
     try {
-      const resp = await fetch(`/api/sessions/${sid}/audit`, {
+      const resp = await fetch(`/api/audits`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sids }),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -213,7 +255,6 @@ export default function Page() {
             const ev = JSON.parse(frame.slice(6)) as AuditEvent;
             if (ev.type === "audit_chunk") {
               setAuditText((prev) => prev + ev.text);
-              // 滚到底
               queueMicrotask(() =>
                 auditRef.current?.scrollTo({ top: auditRef.current.scrollHeight }),
               );
@@ -278,7 +319,7 @@ export default function Page() {
           <select value={bookSlug} onChange={(e) => setBookSlug(e.target.value)} disabled={running}>
             {books.map((b) => (
               <option key={b.slug} value={b.slug}>
-                {b.title}（{b.sectionCount} 节）
+                {b.title}（{b.sectionCount} 节 · {formatChars(b.totalChars)}）
               </option>
             ))}
           </select>
@@ -290,11 +331,15 @@ export default function Page() {
             onChange={(e) => setSectionId(e.target.value)}
             disabled={running || !book}
           >
-            {book?.sections.map((s) => (
-              <option key={s.id} value={s.id}>
-                §{s.id} {s.title}
-              </option>
-            ))}
+            {book?.sections.map((s) => {
+              const stat = currentBookStat?.sections.find((x) => x.id === s.id);
+              return (
+                <option key={s.id} value={s.id}>
+                  §{s.id} {s.title}
+                  {stat ? ` · ${formatChars(stat.chars)}` : ""}
+                </option>
+              );
+            })}
           </select>
         </Field>
 
@@ -339,6 +384,22 @@ export default function Page() {
         )}
       </section>
 
+      {currentBookStat && (
+        <div
+          style={{
+            padding: "8px 12px",
+            marginBottom: 12,
+            fontSize: 12,
+            color: "var(--muted)",
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+          }}
+        >
+          {auditRecommendation(currentBookStat)}
+        </div>
+      )}
+
       {error && (
         <div
           style={{
@@ -359,7 +420,8 @@ export default function Page() {
       <div
         ref={scrollRef}
         style={{
-          height: "calc(100vh - 220px)",
+          height: "calc(100vh - 280px)",
+          minHeight: 300,
           overflowY: "auto",
           padding: 12,
           background: "var(--panel)",
@@ -396,9 +458,9 @@ export default function Page() {
       >
         <span>{sid ? `会话 ${sid}` : "尚未开始"}</span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {sid && sessionDone && !auditing && (
-            <button className="primary" onClick={runAudit}>
-              {auditText ? "重新审计" : "生成审计报告"}
+          {sessionDone && !auditing && (
+            <button className="primary" onClick={openAuditPanel}>
+              审计…
             </button>
           )}
           {auditing && (
@@ -419,6 +481,25 @@ export default function Page() {
         </div>
       </footer>
 
+      {showAuditPanel && !auditing && !auditText && (
+        <AuditPicker
+          book={currentBookStat}
+          currentSid={sid}
+          sessions={existingSessions}
+          picked={pickedSids}
+          onTogglePick={(s) => {
+            setPickedSids((prev) => {
+              const copy = new Set(prev);
+              if (copy.has(s)) copy.delete(s);
+              else copy.add(s);
+              return copy;
+            });
+          }}
+          onCancel={() => setShowAuditPanel(false)}
+          onSubmit={() => runAudit(Array.from(pickedSids))}
+        />
+      )}
+
       {(auditText || auditing) && (
         <section
           ref={auditRef}
@@ -432,8 +513,26 @@ export default function Page() {
             borderRadius: 8,
           }}
         >
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
-            审计报告{auditing && "（生成中…）"}
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--muted)",
+              marginBottom: 8,
+              display: "flex",
+              justifyContent: "space-between",
+            }}
+          >
+            <span>审计报告{auditing && "（生成中…）"}</span>
+            {!auditing && (
+              <button
+                onClick={() => {
+                  setAuditText("");
+                  setShowAuditPanel(true);
+                }}
+              >
+                重开一次
+              </button>
+            )}
           </div>
           <AuditView raw={auditText} />
         </section>
@@ -463,6 +562,144 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span style={{ color: "var(--muted)" }}>{label}</span>
       {children}
     </label>
+  );
+}
+
+function formatChars(n: number): string {
+  if (n < 1000) return `${n} 字`;
+  if (n < 10000) return `${(n / 1000).toFixed(1)}k 字`;
+  return `${(n / 10000).toFixed(1)}w 字`;
+}
+
+/** 根据书总字数给个推荐范围。启发式，不追求精确。 */
+function auditRecommendation(book: BookSummary): string {
+  const total = book.totalChars;
+  const nSec = book.sectionCount;
+  if (total < 20_000) {
+    return `全书约 ${formatChars(total)}，${nSec} 节 —— 可以每节各跑一次会话，最后合审全书。`;
+  }
+  if (total < 80_000) {
+    return `全书约 ${formatChars(total)}，${nSec} 节 —— 建议一次审计覆盖 2-3 节相关内容（例如同一章的三节），审起来性价比较高。`;
+  }
+  if (total < 200_000) {
+    return `全书约 ${formatChars(total)}，${nSec} 节 —— 一次审计建议聚焦一节；跨节审计限制在同一章，最多 2-3 节，超出容易过长。`;
+  }
+  return `全书约 ${formatChars(total)}，${nSec} 节 —— 每次审计只挑一节，或者最多 2 节。合审全书不现实。`;
+}
+
+function AuditPicker({
+  book,
+  currentSid,
+  sessions,
+  picked,
+  onTogglePick,
+  onCancel,
+  onSubmit,
+}: {
+  book: BookSummary | undefined;
+  currentSid: string;
+  sessions: SessionListItem[];
+  picked: Set<string>;
+  onTogglePick: (sid: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  // 按 sectionId 分组
+  const grouped = useMemo(() => {
+    const map = new Map<string, SessionListItem[]>();
+    for (const s of sessions) {
+      if (!map.has(s.sectionId)) map.set(s.sectionId, []);
+      map.get(s.sectionId)!.push(s);
+    }
+    return map;
+  }, [sessions]);
+
+  // 按书里的 section 顺序展示
+  const orderedSectionIds = book?.sections.map((s) => s.id) ?? [];
+
+  return (
+    <section
+      style={{
+        marginTop: 12,
+        padding: 14,
+        background: "var(--panel)",
+        border: "1px solid var(--accent)",
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong style={{ fontSize: 14 }}>选要一起送审的会话</strong>
+        <div style={{ fontSize: 12, color: "var(--muted)" }}>
+          勾选后点"开始审计"。跨多节 = 合审。已选 {picked.size} 个
+        </div>
+      </div>
+
+      <div
+        style={{
+          maxHeight: 300,
+          overflowY: "auto",
+          padding: 8,
+          background: "var(--bg)",
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+        }}
+      >
+        {orderedSectionIds
+          .filter((sid) => grouped.has(sid))
+          .map((secId) => {
+            const list = grouped.get(secId)!;
+            const secTitle = book?.sections.find((s) => s.id === secId)?.title ?? secId;
+            return (
+              <div key={secId} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+                  §{secId} {secTitle}
+                </div>
+                {list.map((s) => (
+                  <label
+                    key={s.sid}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "4px 6px",
+                      fontSize: 13,
+                      cursor: "pointer",
+                      background: picked.has(s.sid) ? "var(--teacher)" : "transparent",
+                      borderRadius: 4,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={picked.has(s.sid)}
+                      onChange={() => onTogglePick(s.sid)}
+                    />
+                    <span style={{ color: s.status === "done" ? "inherit" : "var(--muted)" }}>
+                      {s.sid}
+                      {s.sid === currentSid && "（本次）"}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
+                      {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+                      {s.status}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            );
+          })}
+        {sessions.length === 0 && (
+          <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
+            这本书还没有其它会话。审计当前这次即可。
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button onClick={onCancel}>取消</button>
+        <button className="primary" onClick={onSubmit} disabled={picked.size === 0}>
+          开始审计（{picked.size}）
+        </button>
+      </div>
+    </section>
   );
 }
 
