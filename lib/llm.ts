@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
-export type Purpose = "teacher" | "learner" | "audit";
+export type Purpose = "teacher" | "learner" | "audit" | "coach";
 
 export type LLMMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -10,6 +10,8 @@ export type LLMOptions = {
   maxTokens?: number;
   temperature?: number;
   signal?: AbortSignal;
+  /** 强制模型输出 JSON（OpenAI 兼容 response_format=json_object）。仅非流式生效。 */
+  jsonMode?: boolean;
 };
 
 function requireEnv(key: string): string {
@@ -109,6 +111,7 @@ export function callLLM(
         stream: false,
         max_tokens: opts.maxTokens,
         temperature: opts.temperature,
+        response_format: opts.jsonMode ? { type: "json_object" } : undefined,
       },
       { signal: opts.signal },
     );

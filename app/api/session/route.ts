@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { runSession, type SessionEvent } from "@/lib/session";
-import type { LearnerId } from "@/lib/teacher";
+import type { LearnerId, Pacing } from "@/lib/teacher";
 
 export const runtime = "nodejs";
 // Node fetch/SSE 需要长连接；禁用静态优化
@@ -10,6 +10,8 @@ type StartBody = {
   bookSlug: string;
   sectionId: string;
   learnerId: LearnerId;
+  pacing?: Pacing;
+  coachEnabled?: boolean;
   maxTurns?: number;
 };
 
@@ -34,6 +36,8 @@ export async function POST(req: NextRequest) {
   }
 
   const maxTurns = Math.min(Math.max(body.maxTurns ?? 8, 1), 30);
+  const pacing: Pacing = body.pacing === "thorough" || body.pacing === "express" ? body.pacing : "normal";
+  const coachEnabled = body.coachEnabled !== false; // 默认开
   const abortCtrl = new AbortController();
   // 前端断开时中止 LLM 调用
   req.signal.addEventListener("abort", () => abortCtrl.abort(), { once: true });
@@ -45,6 +49,8 @@ export async function POST(req: NextRequest) {
           bookSlug: body.bookSlug,
           sectionId: body.sectionId,
           learnerId: body.learnerId,
+          pacing,
+          coachEnabled,
           maxTurns,
           signal: abortCtrl.signal,
         })) {
