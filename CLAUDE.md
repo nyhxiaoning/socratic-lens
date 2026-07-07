@@ -8,7 +8,7 @@
 
 - **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。
 - **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
-- **审计 agent**：会话结束后手动触发，读 transcript + 原文，按 `===TAG===` 分隔符协议出**对书本身的诊断**（5 段：VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS）。审计结果落盘到 `data/sessions/<sid>/audit.md`。
+- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。按 `===TAG===` 5 段协议出**对书本身的诊断**（VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS）。落盘到 `data/audits/<aid>/report.md`。
 
 两 agent **独立上下文**：教师视角里学生说的话是 `user`，学生视角里教师说的话是 `user`——参考 `REVERSE-ENGINEERING-REPORT.md` §3.1。
 
@@ -26,19 +26,21 @@
 app/
   page.tsx                          观察页（Client Component）
   layout.tsx / globals.css
-  api/books/route.ts                GET 书列表
+  api/books/route.ts                GET 书列表（含总字数、每节字数）
   api/books/[slug]/route.ts         GET 书详情 / GET ?section=<id> 取一节
   api/session/route.ts              POST 起会话，SSE 返回事件流
+  api/sessions/route.ts             GET ?bookSlug=xxx 列该书所有会话
   api/sessions/[sid]/route.ts       GET 单条会话 meta + transcript
-  api/sessions/[sid]/audit/route.ts GET 已存审计 / POST 跑一次审计（SSE）
+  api/audits/route.ts               POST { sids: [] } 跨会话跑审计（SSE）
+  api/audits/[aid]/route.ts         GET 单次审计的 meta + 报告
 
 lib/
   llm.ts       唯一 callLLM(purpose, messages, opts) 入口
-  book.ts      Book/Section 读取
+  book.ts      Book/Section 读取 + 每节字数统计
   teacher.ts   教师 system prompt 组装 + messages 构造 + 开场触发
   learner.ts   学生 system prompt 组装 + messages 构造
   session.ts   会话循环（async generator, 产 SessionEvent）
-  audit.ts     审计循环 + ===TAG=== 解析 + 落盘到 audit.md
+  audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + ===TAG=== 解析 + 落盘
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
 
 prompts/
@@ -46,9 +48,14 @@ prompts/
   learner_novice.md / learner_mid.md / learner_critic.md
   audit_rules.md
 
+scripts/
+  import-mineru.mjs                 把 MinerU 输出的 full.md 按"节"切分导入
+
 data/
   books/<slug>/manifest.json + sections/<id>.md
-  sessions/<sid>/meta.json + transcript.jsonl + audit.md     （.gitignored）
+  sessions/<sid>/meta.json + transcript.jsonl                （.gitignored）
+  audits/<aid>/meta.json + report.md                         （.gitignored）
+  audits/history.jsonl                                       （.gitignored 全局审计索引）
 ```
 
 只有 `data/books/example/` 提交入库，其它 slug 在 `.gitignore` 里。
@@ -79,7 +86,14 @@ pnpm build && pnpm start
 
 ## 加一本书
 
-1. 在 `data/books/<你的-slug>/` 下建目录（注意 `.gitignore` 默认只提交 `example`，其它 slug 在本地跑就好）
+**从 MinerU 输出导入**（PDF → markdown 已经被 MinerU 处理过）：
+```bash
+node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
+```
+按 `## 导论` / `## 第X章` / `## 第X节` 边界切分成 sections，删掉图片引用和营销广告。
+
+**手动加书**：
+1. 在 `data/books/<你的-slug>/` 下建目录（`.gitignore` 默认只提交 `example` 和 `makesi`，其它 slug 在本地跑就好）
 2. 写 `manifest.json`：
    ```json
    {
@@ -89,7 +103,6 @@ pnpm build && pnpm start
    }
    ```
 3. 写 `sections/<id>.md`——一节一文件，纯 markdown。
-4. 重启不用，观察页 `/api/books` 是 dynamic 的。
 
 ## V1 明确不做
 

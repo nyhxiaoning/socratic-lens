@@ -1,41 +1,34 @@
 import { NextRequest } from "next/server";
-import { readAudit, runAudit, type AuditEvent } from "@/lib/audit";
+import { runAudit, type AuditEvent } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-type Ctx = { params: Promise<{ sid: string }> };
 
 const encoder = new TextEncoder();
 function sseFrame(ev: AuditEvent): Uint8Array {
   return encoder.encode(`data: ${JSON.stringify(ev)}\n\n`);
 }
 
-/** GET：如果有已存的报告则返回，没有 → 404。 */
-export async function GET(_req: NextRequest, ctx: Ctx) {
-  const { sid } = await ctx.params;
-  const report = await readAudit(sid);
-  if (!report) {
-    return new Response(JSON.stringify({ error: "no audit yet" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
+/** POST /api/audits { sids: string[] } → SSE 流 */
+export async function POST(req: NextRequest) {
+  let body: { sids?: string[] };
+  try {
+    body = await req.json();
+  } catch {
+    return new Response(JSON.stringify({ error: "invalid json" }), { status: 400 });
   }
-  return new Response(JSON.stringify({ report }), {
-    headers: { "Content-Type": "application/json" },
-  });
-}
+  const sids = Array.isArray(body.sids) ? body.sids.filter((s) => typeof s === "string") : [];
+  if (sids.length === 0) {
+    return new Response(JSON.stringify({ error: "sids 必填且非空" }), { status: 400 });
+  }
 
-/** POST：跑一次审计，SSE 流。 */
-export async function POST(req: NextRequest, ctx: Ctx) {
-  const { sid } = await ctx.params;
   const abortCtrl = new AbortController();
   req.signal.addEventListener("abort", () => abortCtrl.abort(), { once: true });
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const ev of runAudit(sid, abortCtrl.signal)) {
+        for await (const ev of runAudit(sids, abortCtrl.signal)) {
           controller.enqueue(sseFrame(ev));
           if (ev.type === "audit_done" || ev.type === "audit_error") break;
         }
