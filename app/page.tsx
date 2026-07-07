@@ -49,14 +49,36 @@ type CoachAnalysis = {
   qualityFlags: string[];
 };
 
+type LearnerCoachAnalysis = {
+  understandingLevel: string;
+  shouldHaveLearned: string;
+  actuallyLearned: string;
+  gap: string;
+  prosthesisRisk: string;
+  prosthesisEvidence: string;
+  personaFidelity: string;
+  personaNote: string;
+  affect: string;
+  recommendedAction: string;
+  actionReason: string;
+  responsePlaybook: {
+    ifTeacherAdvances: string;
+    ifTeacherQuestions: string;
+    ifTeacherRepeats: string;
+    ifTeacherWrong: string;
+  };
+  qualityFlags: string[];
+};
+
 type Msg = { turn: number; actor: "teacher" | "learner"; text: string };
 
 type SessionEvent =
-  | { type: "meta"; meta: { sid: string } }
+  | { type: "meta"; meta: { sid: string; turnsSoFar?: number } }
   | { type: "turn_start"; actor: "teacher" | "learner"; turn: number }
   | { type: "chunk"; actor: "teacher" | "learner"; turn: number; text: string }
   | { type: "turn_end"; actor: "teacher" | "learner"; turn: number; text: string }
-  | { type: "coach"; turn: number; analysis: CoachAnalysis }
+  | { type: "coach"; turn: number; side: "teacher" | "learner"; analysis: CoachAnalysis | LearnerCoachAnalysis }
+  | { type: "compressed"; side: "teacher" | "learner"; upto: number }
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
@@ -73,6 +95,8 @@ type SessionListItem = {
   learnerId: LearnerId;
   startedAt: number;
   status: string;
+  maxTurns?: number;
+  turnsSoFar?: number;
 };
 
 const CITE_RE = /〔§([\w-]{1,32})(?:[｜|]([^〕\n]{0,120}))?〕/g;
@@ -85,11 +109,18 @@ export default function Page() {
   const [learnerId, setLearnerId] = useState<LearnerId>("novice");
   const [pacing, setPacing] = useState<Pacing>("normal");
   const [coachEnabled, setCoachEnabled] = useState<boolean>(true);
+  const [learnerCoachEnabled, setLearnerCoachEnabled] = useState<boolean>(true);
   const [maxTurns, setMaxTurns] = useState<number>(6);
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [coachHistory, setCoachHistory] = useState<{ turn: number; analysis: CoachAnalysis }[]>([]);
+  const [learnerCoachHistory, setLearnerCoachHistory] = useState<
+    { turn: number; analysis: LearnerCoachAnalysis }[]
+  >([]);
   const [showCoach, setShowCoach] = useState<boolean>(true);
+  const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
   const [running, setRunning] = useState(false);
   const [sid, setSid] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -143,10 +174,11 @@ export default function Page() {
     [bookSlug, sectionId, learnerId, running],
   );
 
-  async function start() {
+  async function start(resumeSid?: string) {
     setError("");
     setMessages([]);
     setCoachHistory([]);
+    setLearnerCoachHistory([]);
     setSid("");
     setAuditText("");
     setSessionDone(false);
@@ -155,11 +187,45 @@ export default function Page() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
+    // 如果是 resume，先把已存的 turns / coach 载入内存
+    if (resumeSid) {
+      try {
+        const r = await fetch(`/api/sessions/${resumeSid}`);
+        const d = await r.json();
+        if (d.meta) {
+          setSid(resumeSid);
+          setMessages(
+            (d.turns as { turn: number; actor: "teacher" | "learner"; text: string }[])
+              .map((t) => ({ turn: t.turn, actor: t.actor, text: t.text })),
+          );
+          setCoachHistory(
+            (d.teacherCoach as { turn: number; analysis: CoachAnalysis }[])
+              .map((c) => ({ turn: c.turn, analysis: c.analysis })),
+          );
+          setLearnerCoachHistory(
+            (d.learnerCoach as { turn: number; analysis: LearnerCoachAnalysis }[])
+              .map((c) => ({ turn: c.turn, analysis: c.analysis })),
+          );
+          // 用 meta 里的 bookSlug/section/learner 覆盖当前选择（视觉上一致）
+          setBookSlug(d.meta.bookSlug);
+          setSectionId(d.meta.sectionId);
+          setLearnerId(d.meta.learnerId);
+          setPacing(d.meta.pacing || "normal");
+        }
+      } catch {
+        // 忽略
+      }
+    }
+
     try {
       const resp = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bookSlug, sectionId, learnerId, pacing, coachEnabled, maxTurns }),
+        body: JSON.stringify(
+          resumeSid
+            ? { resumeSid, pacing, coachEnabled, learnerCoachEnabled, maxTurns }
+            : { bookSlug, sectionId, learnerId, pacing, coachEnabled, learnerCoachEnabled, maxTurns },
+        ),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -235,7 +301,20 @@ export default function Page() {
         setSessionDone(true);
         break;
       case "coach":
-        setCoachHistory((prev) => [...prev, { turn: ev.turn, analysis: ev.analysis }]);
+        if (ev.side === "teacher") {
+          setCoachHistory((prev) => [
+            ...prev,
+            { turn: ev.turn, analysis: ev.analysis as CoachAnalysis },
+          ]);
+        } else {
+          setLearnerCoachHistory((prev) => [
+            ...prev,
+            { turn: ev.turn, analysis: ev.analysis as LearnerCoachAnalysis },
+          ]);
+        }
+        break;
+      case "compressed":
+        // 静默；侧栏可以显示，先不做
         break;
     }
   }
@@ -330,6 +409,18 @@ export default function Page() {
     }
   }
 
+  async function openHistory() {
+    setShowHistory(true);
+    try {
+      // 拿全部 session（不限 book）
+      const r = await fetch(`/api/sessions`);
+      const d = await r.json();
+      setHistoryItems(d.sessions || []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
       <header style={{ marginBottom: 12 }}>
@@ -410,13 +501,27 @@ export default function Page() {
 
         <Field label="教练">
           <select
-            value={coachEnabled ? "on" : "off"}
-            onChange={(e) => setCoachEnabled(e.target.value === "on")}
+            value={
+              coachEnabled && learnerCoachEnabled
+                ? "both"
+                : coachEnabled
+                  ? "teacher"
+                  : learnerCoachEnabled
+                    ? "learner"
+                    : "off"
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              setCoachEnabled(v === "both" || v === "teacher");
+              setLearnerCoachEnabled(v === "both" || v === "learner");
+            }}
             disabled={running}
-            title="每轮后台跑教练分析，注入下一轮教师 system prompt"
+            title="教师/学生教练分析。每轮结束后并行跑，注入下一轮 system prompt"
           >
-            <option value="on">开</option>
-            <option value="off">关</option>
+            <option value="both">全开</option>
+            <option value="teacher">仅教师</option>
+            <option value="learner">仅学生</option>
+            <option value="off">全关</option>
           </select>
         </Field>
 
@@ -426,7 +531,7 @@ export default function Page() {
             onChange={(e) => setMaxTurns(Number(e.target.value))}
             disabled={running}
           >
-            {[3, 4, 6, 8, 12].map((n) => (
+            {[3, 6, 12, 30, 80, 120].map((n) => (
               <option key={n} value={n}>
                 {n}
               </option>
@@ -437,9 +542,12 @@ export default function Page() {
         <div style={{ flex: 1 }} />
 
         {!running ? (
-          <button className="primary" onClick={start} disabled={!canStart}>
-            开始
-          </button>
+          <>
+            <button onClick={openHistory}>历史…</button>
+            <button className="primary" onClick={() => start()} disabled={!canStart}>
+              开始
+            </button>
+          </>
         ) : (
           <button className="danger" onClick={stop}>
             停止
@@ -483,7 +591,11 @@ export default function Page() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: showCoach && (coachEnabled || coachHistory.length > 0) ? "1fr 300px" : "1fr",
+          gridTemplateColumns:
+            showCoach &&
+            (coachEnabled || learnerCoachEnabled || coachHistory.length > 0 || learnerCoachHistory.length > 0)
+              ? "1fr 320px"
+              : "1fr",
           gap: 12,
           height: "calc(100vh - 280px)",
           minHeight: 300,
@@ -514,7 +626,7 @@ export default function Page() {
           )}
         </div>
 
-        {(coachEnabled || coachHistory.length > 0) && showCoach && (
+        {(coachEnabled || learnerCoachEnabled || coachHistory.length > 0 || learnerCoachHistory.length > 0) && showCoach && (
           <aside
             style={{
               overflowY: "auto",
@@ -533,24 +645,50 @@ export default function Page() {
                 marginBottom: 8,
               }}
             >
-              <strong style={{ fontSize: 13 }}>教练分析</strong>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  onClick={() => setCoachTab("teacher")}
+                  className={coachTab === "teacher" ? "primary" : ""}
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                >
+                  教师教练 ({coachHistory.length})
+                </button>
+                <button
+                  onClick={() => setCoachTab("learner")}
+                  className={coachTab === "learner" ? "primary" : ""}
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                >
+                  学生教练 ({learnerCoachHistory.length})
+                </button>
+              </div>
               <button style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => setShowCoach(false)}>
                 收起
               </button>
             </div>
-            {coachHistory.length === 0 ? (
+            {coachTab === "teacher" ? (
+              coachHistory.length === 0 ? (
+                <div style={{ color: "var(--muted)" }}>
+                  每轮结束后教师教练会在这里放一份分析。
+                </div>
+              ) : (
+                coachHistory
+                  .slice()
+                  .reverse()
+                  .map((c) => <CoachCard key={c.turn} turn={c.turn} a={c.analysis} />)
+              )
+            ) : learnerCoachHistory.length === 0 ? (
               <div style={{ color: "var(--muted)" }}>
-                每轮结束后教练会在这里放一份分析（第 1 轮后开始出现）。
+                每轮结束后学生教练会在这里放一份分析。
               </div>
             ) : (
-              coachHistory
+              learnerCoachHistory
                 .slice()
                 .reverse()
-                .map((c) => <CoachCard key={c.turn} turn={c.turn} a={c.analysis} />)
+                .map((c) => <LearnerCoachCard key={c.turn} turn={c.turn} a={c.analysis} />)
             )}
           </aside>
         )}
-        {(coachEnabled || coachHistory.length > 0) && !showCoach && (
+        {(coachEnabled || learnerCoachEnabled) && !showCoach && (
           <button
             onClick={() => setShowCoach(true)}
             style={{
@@ -658,6 +796,18 @@ export default function Page() {
           </div>
           <AuditView raw={auditText} />
         </section>
+      )}
+
+      {showHistory && (
+        <HistoryDrawer
+          items={historyItems}
+          books={books}
+          onClose={() => setShowHistory(false)}
+          onResume={(sid) => {
+            setShowHistory(false);
+            start(sid);
+          }}
+        />
       )}
 
       {modalSection && (
@@ -1072,4 +1222,208 @@ function Row({ k, v, danger }: { k: string; v: string; danger?: boolean }) {
       <span style={{ color: danger ? "var(--danger)" : "inherit", wordBreak: "break-word" }}>{v}</span>
     </div>
   );
+}
+
+const UNDERSTANDING_COLORS: Record<string, string> = {
+  not_yet: "var(--danger)",
+  superficial: "var(--danger)",
+  working: "var(--muted)",
+  solid: "var(--accent)",
+  deep: "var(--accent)",
+};
+const PROSTHESIS_COLORS: Record<string, string> = {
+  none: "var(--muted)",
+  mild: "var(--danger)",
+  strong: "var(--danger)",
+};
+const PERSONA_COLORS: Record<string, string> = {
+  faithful: "var(--muted)",
+  drifting: "var(--danger)",
+  broken: "var(--danger)",
+};
+
+function LearnerCoachCard({ turn, a }: { turn: number; a: LearnerCoachAnalysis }) {
+  return (
+    <details
+      style={{
+        marginBottom: 8,
+        padding: 8,
+        background: "var(--bg)",
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+      }}
+    >
+      <summary style={{ cursor: "pointer", userSelect: "none" }}>
+        <span style={{ color: "var(--muted)" }}>第 {turn} 轮后 · </span>
+        <span style={{ color: UNDERSTANDING_COLORS[a.understandingLevel] ?? "inherit" }}>
+          {a.understandingLevel}
+        </span>
+        {a.prosthesisRisk !== "none" && (
+          <>
+            <span style={{ color: "var(--muted)" }}> / </span>
+            <span style={{ color: PROSTHESIS_COLORS[a.prosthesisRisk] }}>
+              作弊:{a.prosthesisRisk}
+            </span>
+          </>
+        )}
+        {a.personaFidelity !== "faithful" && (
+          <>
+            <span style={{ color: "var(--muted)" }}> / </span>
+            <span style={{ color: PERSONA_COLORS[a.personaFidelity] }}>
+              画像:{a.personaFidelity}
+            </span>
+          </>
+        )}
+        <span style={{ color: "var(--muted)" }}> → </span>
+        <strong>{a.recommendedAction}</strong>
+      </summary>
+      <div style={{ marginTop: 8, display: "grid", rowGap: 4 }}>
+        <Row k="应学会" v={a.shouldHaveLearned} />
+        <Row k="实学到" v={a.actuallyLearned} />
+        {a.gap && a.gap !== "无" && <Row k="落差" v={a.gap} danger />}
+        <Row k="心态" v={a.affect} />
+        {a.prosthesisRisk !== "none" && (
+          <Row k="⚠️ 作弊" v={a.prosthesisEvidence} danger />
+        )}
+        {a.personaFidelity !== "faithful" && (
+          <Row k="⚠️ 画像" v={a.personaNote} danger />
+        )}
+        {a.qualityFlags.length > 0 && (
+          <Row k="标记" v={a.qualityFlags.join(" / ")} danger />
+        )}
+        <Row k="推荐" v={`${a.recommendedAction} — ${a.actionReason}`} />
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 11 }}>
+            playbook
+          </summary>
+          <div style={{ paddingLeft: 8, marginTop: 4, color: "var(--muted)" }}>
+            <div>· 老师推进：{a.responsePlaybook.ifTeacherAdvances}</div>
+            <div>· 老师提问：{a.responsePlaybook.ifTeacherQuestions}</div>
+            <div>· 老师重复：{a.responsePlaybook.ifTeacherRepeats}</div>
+            <div>· 老师错/跳：{a.responsePlaybook.ifTeacherWrong}</div>
+          </div>
+        </details>
+      </div>
+    </details>
+  );
+}
+
+function HistoryDrawer({
+  items,
+  books,
+  onClose,
+  onResume,
+}: {
+  items: SessionListItem[];
+  books: BookSummary[];
+  onClose: () => void;
+  onResume: (sid: string) => void;
+}) {
+  const bookTitleOf = (slug: string) => books.find((b) => b.slug === slug)?.title ?? slug;
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        justifyContent: "flex-end",
+        zIndex: 100,
+      }}
+    >
+      <aside
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--panel)",
+          border: "1px solid var(--border)",
+          width: 480,
+          maxWidth: "90vw",
+          height: "100vh",
+          padding: 16,
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+          <strong>历史会话</strong>
+          <button onClick={onClose}>关闭</button>
+        </div>
+        {items.length === 0 && (
+          <div style={{ color: "var(--muted)", padding: 30, textAlign: "center" }}>
+            还没有历史会话。
+          </div>
+        )}
+        {items.map((s) => (
+          <div
+            key={s.sid}
+            style={{
+              padding: 10,
+              marginBottom: 8,
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "var(--bg)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <strong style={{ fontSize: 13 }}>{bookTitleOf(s.bookSlug)}</strong>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                {new Date(s.startedAt).toLocaleString("zh-CN")}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+              §{s.sectionId} · {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+              <StatusBadge status={s.status} /> ·{" "}
+              <span>
+                {s.turnsSoFar ?? "?"} / {s.maxTurns ?? "?"} 轮
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, fontFamily: "monospace" }}>
+              {s.sid}
+            </div>
+            <div style={{ marginTop: 6, display: "flex", gap: 6, justifyContent: "flex-end" }}>
+              <a
+                href={`/api/sessions/${s.sid}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: 11, color: "var(--accent)", alignSelf: "center" }}
+              >
+                查看
+              </a>
+              {(s.status === "aborted" || s.status === "errored") &&
+                (s.turnsSoFar ?? 0) < (s.maxTurns ?? 0) && (
+                  <button
+                    style={{ padding: "2px 8px", fontSize: 11 }}
+                    onClick={() => onResume(s.sid)}
+                  >
+                    继续
+                  </button>
+                )}
+            </div>
+          </div>
+        ))}
+      </aside>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const color =
+    status === "done"
+      ? "var(--accent)"
+      : status === "running"
+        ? "var(--accent)"
+        : status === "aborted"
+          ? "var(--muted)"
+          : "var(--danger)";
+  const label =
+    status === "done"
+      ? "完成"
+      : status === "running"
+        ? "进行中"
+        : status === "aborted"
+          ? "中止"
+          : status === "errored"
+            ? "报错"
+            : status;
+  return <span style={{ color }}>{label}</span>;
 }
