@@ -353,6 +353,8 @@ export default function Page() {
 
   function stop() {
     abortRef.current?.abort();
+    // 手动停止后立刻允许审计（不等 SSE 的 done——它多半到不了）
+    setSessionDone(true);
   }
 
   async function openAuditPanel() {
@@ -760,7 +762,7 @@ export default function Page() {
           )}
         </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {sessionDone && !auditing && (
+          {sid && !running && !auditing && (
             <button className="primary" onClick={openAuditPanel}>
               审计…
             </button>
