@@ -45,7 +45,8 @@
     "ifSubstantive": "如果学生下一句是实质回答/复述，教师应该……",
     "ifConfused": "如果学生下一句是表达困惑/'我不太明白'，教师应该……"
   },
-  "qualityFlags": []
+  "qualityFlags": [],
+  "contentProgress": "first_half | second_half | done"
 }
 ```
 
@@ -90,6 +91,13 @@
 - `"no_question_ending"`：教师上一轮没以问题结尾
 - `"missing_citation"`：教师讲了内容但一次都没引用 `〔§...｜...〕`（本节课至少要有一次引用作为诚意）
 - `"learner_prosthetic_understanding"`：学生复述听起来对但漏了关键前提
+
+**contentProgress**（教师**当前窗口**内容的教学进度——只有本节被分页时才生效）：
+- `first_half`：教师还在讲窗口的前半——刚开始铺陈、给例子、抛问题；学生还在消化
+- `second_half`：教师已经讲到窗口的后半、正在收尾这一段——本轮涉及的点是窗口末尾附近的内容、或学生开始追问深层
+- `done`：窗口内容基本讲完了，教师需要**新素材**——学生已复述、老师已确认，再讲下去就是重复
+
+用途：连续观察到 `second_half` 或 `done` 会**自动触发翻页**，把教师的窗口向后滑，让 ta 看到下一段原文。判断保守——不确定就写 `first_half`。
 
 ## 硬规则
 

@@ -14,6 +14,8 @@
 
 **长会话支持**：轮数最高 120。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
 
+**自适应翻页**（§5.4）：如果一节原文 > 12k 字符，会切成 ~2k 字符/页；教师初始只看头 3-4 页（约 8k 字符窗口）；每轮教练判断 `contentProgress`（first_half / second_half / done），连续 2 次非 first_half 就自动翻页（保留 2 页重叠 + 追加新页至预算，末页守恒）。`data/sessions/<sid>/meta.json` 里 `windowStartPage/endPage` 全程可 resume。
+
 **进度保持**：所有状态每轮末落盘（transcript.jsonl append-only、coach.jsonl / learner_coach.jsonl、meta.json）。软件重启：`/api/session` 首次调用时跑 `reconcileOnStartup()`，把状态残留为 `running` 的老会话改成 `aborted`。观察页"历史"抽屉可以列出所有会话、查看 transcript、对未完成的会话点"继续"从最后一个完整轮次续跑。
 
 两 agent **独立上下文**：教师视角里学生说的话是 `user`，学生视角里教师说的话是 `user`——参考 `REVERSE-ENGINEERING-REPORT.md` §3.1。
@@ -42,11 +44,12 @@ app/
 
 lib/
   llm.ts       唯一 callLLM(purpose, messages, opts) 入口（含 jsonMode）
-  book.ts      Book/Section 读取 + 每节字数统计
-  teacher.ts   教师 system prompt 组装（含 pacing + 教练分析注入）
+  book.ts      Book/Section 读取 + 每节字数统计 + 分页缓存
+  pagination.ts 分页与滑窗算法（Socratopia §5.4 xC 简版）
+  teacher.ts   教师 system prompt 组装（含 pacing + 教练分析注入 + 分页窗口）
   learner.ts   学生 system prompt 组装（含学生教练分析注入）
   coach.ts     教师教练 + 学生教练：analyze* / render*Block
-  session.ts   会话循环 + 滑动摘要 + 双教练并行 + resume + reconcileOnStartup
+  session.ts   会话循环 + 滑动摘要 + 双教练并行 + 自适应翻页 + resume + reconcile
   audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + ===TAG=== 解析 + 落盘
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
 

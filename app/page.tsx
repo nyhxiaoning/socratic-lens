@@ -47,6 +47,7 @@ type CoachAnalysis = {
     ifConfused: string;
   };
   qualityFlags: string[];
+  contentProgress?: string;
 };
 
 type LearnerCoachAnalysis = {
@@ -79,6 +80,13 @@ type SessionEvent =
   | { type: "turn_end"; actor: "teacher" | "learner"; turn: number; text: string }
   | { type: "coach"; turn: number; side: "teacher" | "learner"; analysis: CoachAnalysis | LearnerCoachAnalysis }
   | { type: "compressed"; side: "teacher" | "learner"; upto: number }
+  | {
+      type: "window_slide";
+      turn: number;
+      startPage: number;
+      endPage: number;
+      totalPages: number;
+    }
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
@@ -121,6 +129,11 @@ export default function Page() {
   const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
   const [showHistory, setShowHistory] = useState<boolean>(false);
   const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
+  const [windowInfo, setWindowInfo] = useState<{
+    startPage: number;
+    endPage: number;
+    totalPages: number;
+  } | null>(null);
   const [running, setRunning] = useState(false);
   const [sid, setSid] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -183,6 +196,7 @@ export default function Page() {
     setAuditText("");
     setSessionDone(false);
     setShowAuditPanel(false);
+    setWindowInfo(null);
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -211,6 +225,17 @@ export default function Page() {
           setSectionId(d.meta.sectionId);
           setLearnerId(d.meta.learnerId);
           setPacing(d.meta.pacing || "normal");
+          if (
+            d.meta.windowStartPage !== undefined &&
+            d.meta.windowEndPage !== undefined
+          ) {
+            // totalPages 我们从 session-side 事件流后续拿；先没有的话显示 ?
+            setWindowInfo({
+              startPage: d.meta.windowStartPage,
+              endPage: d.meta.windowEndPage,
+              totalPages: 0,
+            });
+          }
         }
       } catch {
         // 忽略
@@ -315,6 +340,13 @@ export default function Page() {
         break;
       case "compressed":
         // 静默；侧栏可以显示，先不做
+        break;
+      case "window_slide":
+        setWindowInfo({
+          startPage: ev.startPage,
+          endPage: ev.endPage,
+          totalPages: ev.totalPages,
+        });
         break;
     }
   }
@@ -716,7 +748,17 @@ export default function Page() {
           flexWrap: "wrap",
         }}
       >
-        <span>{sid ? `会话 ${sid}` : "尚未开始"}</span>
+        <span>
+          {sid ? `会话 ${sid}` : "尚未开始"}
+          {windowInfo && windowInfo.totalPages > 0 && (
+            <>
+              {" · "}
+              <span title="教师当前看到的原文范围（自适应翻页）">
+                窗口 页 {windowInfo.startPage}–{windowInfo.endPage} / {windowInfo.totalPages}
+              </span>
+            </>
+          )}
+        </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {sessionDone && !auditing && (
             <button className="primary" onClick={openAuditPanel}>
@@ -1198,6 +1240,13 @@ function CoachCard({ turn, a }: { turn: number; a: CoachAnalysis }) {
         <Row k="推荐" v={`${a.recommendedAction} — ${a.actionReason}`} />
         {a.qualityFlags.length > 0 && (
           <Row k="标记" v={a.qualityFlags.join(" / ")} danger />
+        )}
+        {a.contentProgress && (
+          <Row
+            k="窗口进度"
+            v={a.contentProgress}
+            danger={a.contentProgress === "done"}
+          />
         )}
         <details style={{ marginTop: 4 }}>
           <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 11 }}>
