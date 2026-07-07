@@ -21,6 +21,34 @@ const LEARNERS: { id: LearnerId; label: string; desc: string }[] = [
   { id: "critic", label: "挑刺型", desc: "主动找边界与反例，容易质疑" },
 ];
 
+type Pacing = "thorough" | "normal" | "express";
+const PACINGS: { id: Pacing; label: string; desc: string }[] = [
+  { id: "thorough", label: "细", desc: "拆到最细，多复述多例子" },
+  { id: "normal", label: "中", desc: "正常节奏，每 2-3 轮复述一次" },
+  { id: "express", label: "快", desc: "跳过基础，直奔核心" },
+];
+
+type CoachAnalysis = {
+  companionBehavior: string;
+  learnerEngagement: string;
+  isLearnerDrivingRepetition: boolean;
+  isTangent: boolean;
+  mainlineTopic: string;
+  currentFocus: string;
+  learnerWeakPoint: string;
+  recentPatterns: string;
+  teachingGoalAlignment: string;
+  recommendedAction: string;
+  actionReason: string;
+  responsePlaybook: {
+    ifShortAck: string;
+    ifQuestion: string;
+    ifSubstantive: string;
+    ifConfused: string;
+  };
+  qualityFlags: string[];
+};
+
 type Msg = { turn: number; actor: "teacher" | "learner"; text: string };
 
 type SessionEvent =
@@ -28,6 +56,7 @@ type SessionEvent =
   | { type: "turn_start"; actor: "teacher" | "learner"; turn: number }
   | { type: "chunk"; actor: "teacher" | "learner"; turn: number; text: string }
   | { type: "turn_end"; actor: "teacher" | "learner"; turn: number; text: string }
+  | { type: "coach"; turn: number; analysis: CoachAnalysis }
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
@@ -54,9 +83,13 @@ export default function Page() {
   const [book, setBook] = useState<BookDetail | null>(null);
   const [sectionId, setSectionId] = useState<string>("");
   const [learnerId, setLearnerId] = useState<LearnerId>("novice");
+  const [pacing, setPacing] = useState<Pacing>("normal");
+  const [coachEnabled, setCoachEnabled] = useState<boolean>(true);
   const [maxTurns, setMaxTurns] = useState<number>(6);
 
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [coachHistory, setCoachHistory] = useState<{ turn: number; analysis: CoachAnalysis }[]>([]);
+  const [showCoach, setShowCoach] = useState<boolean>(true);
   const [running, setRunning] = useState(false);
   const [sid, setSid] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -113,6 +146,7 @@ export default function Page() {
   async function start() {
     setError("");
     setMessages([]);
+    setCoachHistory([]);
     setSid("");
     setAuditText("");
     setSessionDone(false);
@@ -125,7 +159,7 @@ export default function Page() {
       const resp = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bookSlug, sectionId, learnerId, maxTurns }),
+        body: JSON.stringify({ bookSlug, sectionId, learnerId, pacing, coachEnabled, maxTurns }),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -199,6 +233,9 @@ export default function Page() {
         break;
       case "done":
         setSessionDone(true);
+        break;
+      case "coach":
+        setCoachHistory((prev) => [...prev, { turn: ev.turn, analysis: ev.analysis }]);
         break;
     }
   }
@@ -357,6 +394,32 @@ export default function Page() {
           </select>
         </Field>
 
+        <Field label="节奏">
+          <select
+            value={pacing}
+            onChange={(e) => setPacing(e.target.value as Pacing)}
+            disabled={running}
+          >
+            {PACINGS.map((p) => (
+              <option key={p.id} value={p.id} title={p.desc}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="教练">
+          <select
+            value={coachEnabled ? "on" : "off"}
+            onChange={(e) => setCoachEnabled(e.target.value === "on")}
+            disabled={running}
+            title="每轮后台跑教练分析，注入下一轮教师 system prompt"
+          >
+            <option value="on">开</option>
+            <option value="off">关</option>
+          </select>
+        </Field>
+
         <Field label="轮数">
           <select
             value={maxTurns}
@@ -418,29 +481,88 @@ export default function Page() {
       )}
 
       <div
-        ref={scrollRef}
         style={{
+          display: "grid",
+          gridTemplateColumns: showCoach && (coachEnabled || coachHistory.length > 0) ? "1fr 300px" : "1fr",
+          gap: 12,
           height: "calc(100vh - 280px)",
           minHeight: 300,
-          overflowY: "auto",
-          padding: 12,
-          background: "var(--panel)",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
         }}
       >
-        {messages.length === 0 && !running && (
-          <div style={{ color: "var(--muted)", textAlign: "center", padding: 40 }}>
-            选好书、节和学生档位，点"开始"。教师说完一轮学生跟上，共 {maxTurns} 轮。
-          </div>
+        <div
+          ref={scrollRef}
+          style={{
+            overflowY: "auto",
+            padding: 12,
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+          }}
+        >
+          {messages.length === 0 && !running && (
+            <div style={{ color: "var(--muted)", textAlign: "center", padding: 40 }}>
+              选好书、节和学生档位，点"开始"。教师说完一轮学生跟上，共 {maxTurns} 轮。
+            </div>
+          )}
+          {messages.map((m, i) => (
+            <Bubble key={i} msg={m} onCite={openSection} />
+          ))}
+          {running && (
+            <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 6 }}>
+              ● 进行中…
+            </div>
+          )}
+        </div>
+
+        {(coachEnabled || coachHistory.length > 0) && showCoach && (
+          <aside
+            style={{
+              overflowY: "auto",
+              padding: 12,
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              fontSize: 12,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 8,
+              }}
+            >
+              <strong style={{ fontSize: 13 }}>教练分析</strong>
+              <button style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => setShowCoach(false)}>
+                收起
+              </button>
+            </div>
+            {coachHistory.length === 0 ? (
+              <div style={{ color: "var(--muted)" }}>
+                每轮结束后教练会在这里放一份分析（第 1 轮后开始出现）。
+              </div>
+            ) : (
+              coachHistory
+                .slice()
+                .reverse()
+                .map((c) => <CoachCard key={c.turn} turn={c.turn} a={c.analysis} />)
+            )}
+          </aside>
         )}
-        {messages.map((m, i) => (
-          <Bubble key={i} msg={m} onCite={openSection} />
-        ))}
-        {running && (
-          <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 6 }}>
-            ● 进行中…
-          </div>
+        {(coachEnabled || coachHistory.length > 0) && !showCoach && (
+          <button
+            onClick={() => setShowCoach(true)}
+            style={{
+              position: "absolute",
+              right: 20,
+              top: 210,
+              fontSize: 11,
+              padding: "2px 8px",
+            }}
+          >
+            显示教练
+          </button>
         )}
       </div>
 
@@ -873,4 +995,81 @@ function parseAuditSections(raw: string): { tag: string; body: string }[] {
     out.push({ tag: cur.tag, body: raw.slice(cur.contentStart, nextStart).trim() });
   }
   return out;
+}
+
+const BEHAVIOR_COLORS: Record<string, string> = {
+  normal: "var(--muted)",
+  looping: "var(--danger)",
+  drifting: "var(--danger)",
+  criticizing_author: "var(--danger)",
+  vague_answers: "var(--danger)",
+};
+const ENGAGEMENT_COLORS: Record<string, string> = {
+  passive: "var(--muted)",
+  following: "var(--muted)",
+  curious: "var(--accent)",
+  deeply_engaged: "var(--accent)",
+  frustrated: "var(--danger)",
+};
+
+function CoachCard({ turn, a }: { turn: number; a: CoachAnalysis }) {
+  return (
+    <details
+      open={turn === -1}
+      style={{
+        marginBottom: 8,
+        padding: 8,
+        background: "var(--bg)",
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+      }}
+    >
+      <summary style={{ cursor: "pointer", userSelect: "none" }}>
+        <span style={{ color: "var(--muted)" }}>第 {turn} 轮后 · </span>
+        <span style={{ color: BEHAVIOR_COLORS[a.companionBehavior] ?? "inherit" }}>
+          {a.companionBehavior}
+        </span>
+        <span style={{ color: "var(--muted)" }}> / </span>
+        <span style={{ color: ENGAGEMENT_COLORS[a.learnerEngagement] ?? "inherit" }}>
+          {a.learnerEngagement}
+        </span>
+        <span style={{ color: "var(--muted)" }}> → </span>
+        <strong>{a.recommendedAction}</strong>
+      </summary>
+      <div style={{ marginTop: 8, display: "grid", rowGap: 4 }}>
+        <Row k="焦点" v={a.currentFocus} />
+        <Row k="薄弱" v={a.learnerWeakPoint} />
+        <Row k="对齐" v={a.teachingGoalAlignment} />
+        <Row k="模式" v={a.recentPatterns} />
+        {a.isTangent && <Row k="⚠️ 跑题" v={`应回到：${a.mainlineTopic}`} danger />}
+        {a.isLearnerDrivingRepetition && (
+          <Row k="⚠️ 学生复读" v="学生在推动同一点反复被讲——教师应换讲法" danger />
+        )}
+        <Row k="推荐" v={`${a.recommendedAction} — ${a.actionReason}`} />
+        {a.qualityFlags.length > 0 && (
+          <Row k="标记" v={a.qualityFlags.join(" / ")} danger />
+        )}
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 11 }}>
+            playbook
+          </summary>
+          <div style={{ paddingLeft: 8, marginTop: 4, color: "var(--muted)" }}>
+            <div>· 短肯定：{a.responsePlaybook.ifShortAck}</div>
+            <div>· 提问：{a.responsePlaybook.ifQuestion}</div>
+            <div>· 实质回答：{a.responsePlaybook.ifSubstantive}</div>
+            <div>· 表达困惑：{a.responsePlaybook.ifConfused}</div>
+          </div>
+        </details>
+      </div>
+    </details>
+  );
+}
+
+function Row({ k, v, danger }: { k: string; v: string; danger?: boolean }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "48px 1fr", gap: 6, fontSize: 12 }}>
+      <span style={{ color: "var(--muted)" }}>{k}</span>
+      <span style={{ color: danger ? "var(--danger)" : "inherit", wordBreak: "break-word" }}>{v}</span>
+    </div>
+  );
 }
