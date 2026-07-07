@@ -40,6 +40,8 @@ export type CoachAnalysis = {
     ifConfused: string;
   };
   qualityFlags: string[];
+  /** 教师当前窗口的教学进度（只有本节被分页时才有意义）。缺失时视为 first_half。 */
+  contentProgress?: "first_half" | "second_half" | "done";
 };
 
 /** 与 prompts/learner_coach_rules.md 严格对齐（学生教练）。 */

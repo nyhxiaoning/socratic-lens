@@ -1,6 +1,11 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { BOOKS_ROOT, exists, listDir, readJson, readText } from "./storage";
+import {
+  paginate,
+  PAGINATION_THRESHOLD,
+  type Page,
+} from "./pagination";
+import { BOOKS_ROOT, exists, listDir, readJson, readText, writeAtomic } from "./storage";
 
 export type SectionMeta = { id: string; title: string };
 export type BookManifest = {
@@ -73,4 +78,38 @@ export async function getSection(slug: string, sectionId: string): Promise<strin
 
 export function getSectionTitle(book: BookManifest, sectionId: string): string {
   return book.sections.find((s) => s.id === sectionId)?.title ?? sectionId;
+}
+
+// ============================================================================
+// 分页（自适应翻页）
+// ============================================================================
+
+function pagesCachePath(slug: string, sectionId: string): string {
+  return path.join(BOOKS_ROOT, slug, "sections", `${sectionId}.pages.json`);
+}
+
+/**
+ * 拿一节的分页信息。若原文长度 < 阈值 → 返回 null（不分页，直接全塞）。
+ * 首次读会写盘缓存 sections/<id>.pages.json，下次直接读缓存。
+ */
+export async function getPages(slug: string, sectionId: string): Promise<Page[] | null> {
+  const text = await getSection(slug, sectionId);
+  if (text.length < PAGINATION_THRESHOLD) return null;
+
+  const cachePath = pagesCachePath(slug, sectionId);
+  if (await exists(cachePath)) {
+    try {
+      const cached = await readJson<{ chars: number; pages: Page[] }>(cachePath);
+      // 缓存有效性检验：原文字符数与缓存一致才用
+      if (cached.chars === text.length && Array.isArray(cached.pages) && cached.pages.length > 0) {
+        return cached.pages;
+      }
+    } catch {
+      // 缓存坏了，重新算
+    }
+  }
+
+  const pages = paginate(text);
+  await writeAtomic(cachePath, JSON.stringify({ chars: text.length, pages }, null, 2));
+  return pages;
 }

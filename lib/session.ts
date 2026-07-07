@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getBook, getSectionTitle } from "./book";
+import { getBook, getPages, getSectionTitle } from "./book";
 import {
   analyzeLearnerWithCoach,
   analyzeWithCoach,
@@ -11,6 +11,7 @@ import {
   buildLearnerMessages,
   buildLearnerSystemPrompt,
 } from "./learner";
+import { initialWindow, slideWindow } from "./pagination";
 import {
   appendLine,
   ensureDir,
@@ -50,6 +51,9 @@ export type SessionMeta = {
   teacherSummaryUpto?: number; // 摘要覆盖到第几个 turn（包含）
   learnerSummary?: string;
   learnerSummaryUpto?: number;
+  /** 自适应翻页：教师当前看到的窗口页码（仅本节被分页时用）。 */
+  windowStartPage?: number;
+  windowEndPage?: number;
 };
 
 export type SessionEvent =
@@ -59,6 +63,13 @@ export type SessionEvent =
   | { type: "turn_end"; actor: Actor; turn: number; text: string }
   | { type: "coach"; turn: number; side: "teacher" | "learner"; analysis: CoachAnalysis | LearnerCoachAnalysis }
   | { type: "compressed"; side: "teacher" | "learner"; upto: number }
+  | {
+      type: "window_slide";
+      turn: number;
+      startPage: number;
+      endPage: number;
+      totalPages: number;
+    }
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
@@ -386,6 +397,11 @@ export async function* runSession(
       turns = turns.slice(0, -1);
     }
 
+    // 自适应翻页：教练最近若干轮 contentProgress 的滑动记录（参照 Socratopia §5.4 的思路）
+    const recentProgress: ("first_half" | "second_half" | "done")[] = [];
+    const PROGRESS_WINDOW = 4;
+    const PROGRESS_TRIGGER = 2;
+
     while (turnIdx < meta.maxTurns) {
       if (input.signal.aborted) break;
       turnIdx++;
@@ -398,14 +414,28 @@ export async function* runSession(
         summaryUpto: meta.teacherSummaryUpto,
         budget: CONTEXT_KEEP_CHARS_TEACHER,
       });
-      let teacherSystem = await buildTeacherSystemPrompt(
-        book,
-        meta.bookSlug,
-        meta.sectionId,
-        meta.learnerId,
-        meta.pacing,
-        coachAnalysis,
-      );
+      const { systemPrompt: teacherSystemBase, window: teacherOriginWindow } =
+        await buildTeacherSystemPrompt(
+          book,
+          meta.bookSlug,
+          meta.sectionId,
+          meta.learnerId,
+          meta.pacing,
+          coachAnalysis,
+          meta.windowStartPage !== undefined && meta.windowEndPage !== undefined
+            ? { startPage: meta.windowStartPage, endPage: meta.windowEndPage }
+            : undefined,
+        );
+      // 若首轮 & 本节被分页 & meta 里还没有窗口，把 buildTeacherSystemPrompt 决定的初始窗口回写
+      if (
+        teacherOriginWindow.paginated &&
+        (meta.windowStartPage === undefined || meta.windowEndPage === undefined)
+      ) {
+        meta.windowStartPage = teacherOriginWindow.startPage;
+        meta.windowEndPage = teacherOriginWindow.endPage;
+        await writeMeta(meta);
+      }
+      let teacherSystem = teacherSystemBase;
       if (teacherWindow.addendum) {
         teacherSystem = teacherSystem + "\n\n---\n\n" + teacherWindow.addendum;
       }
@@ -538,6 +568,44 @@ export async function* runSession(
             side: "learner",
             analysis: learnerCoachAnalysis,
           };
+        }
+
+        // ---- 自适应翻页 ----
+        // 仅当本节被分页 + 教师教练开着 + 已经有窗口时才考虑翻页
+        if (
+          meta.coachEnabled &&
+          coachAnalysis &&
+          meta.windowStartPage !== undefined &&
+          meta.windowEndPage !== undefined
+        ) {
+          const progress = coachAnalysis.contentProgress ?? "first_half";
+          recentProgress.push(progress);
+          if (recentProgress.length > PROGRESS_WINDOW) recentProgress.shift();
+          const nonFirst = recentProgress.filter((p) => p !== "first_half").length;
+
+          if (nonFirst >= PROGRESS_TRIGGER) {
+            // 检查是否还能翻
+            const pages = await getPages(meta.bookSlug, meta.sectionId);
+            if (pages && meta.windowEndPage < pages.length) {
+              const next = slideWindow(pages, {
+                startPage: meta.windowStartPage,
+                endPage: meta.windowEndPage,
+              });
+              if (next) {
+                meta.windowStartPage = next.startPage;
+                meta.windowEndPage = next.endPage;
+                recentProgress.length = 0; // 翻完页重置计数
+                await writeMeta(meta);
+                yield {
+                  type: "window_slide",
+                  turn: turnIdx,
+                  startPage: next.startPage,
+                  endPage: next.endPage,
+                  totalPages: pages.length,
+                };
+              }
+            }
+          }
         }
       }
 
