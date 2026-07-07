@@ -1,0 +1,106 @@
+# CLAUDE.md
+
+给 Claude Code 用的项目指南。
+
+## 这是什么
+
+一个 Socratopia 风格的"教-学-审"多 agent 试验台，用来审计用户自己写的书。
+
+- **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。
+- **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
+- **审计 agent**：V1 不做，只把 transcript 完整落盘，V2 再接。
+
+两 agent **独立上下文**：教师视角里学生说的话是 `user`，学生视角里教师说的话是 `user`——参考 `REVERSE-ENGINEERING-REPORT.md` §3.1。
+
+一个 SSE 观察页 (`app/page.tsx`) 实时看两 agent 对话。
+
+## 技术栈
+
+- Next.js 15 app router + React 19 + TypeScript
+- OpenAI 兼容 SDK（走 `LLM_BASE_URL` 环境变量，不绑定 provider）
+- 无数据库；书 / 会话 / prompt 都是文件
+
+## 目录
+
+```
+app/
+  page.tsx                          观察页（Client Component）
+  layout.tsx / globals.css
+  api/books/route.ts                GET 书列表
+  api/books/[slug]/route.ts         GET 书详情 / GET ?section=<id> 取一节
+  api/session/route.ts              POST 起会话，SSE 返回事件流
+  api/sessions/[sid]/route.ts       GET 单条会话 meta + transcript
+
+lib/
+  llm.ts       唯一 callLLM(purpose, messages, opts) 入口
+  book.ts      Book/Section 读取
+  teacher.ts   教师 system prompt 组装 + messages 构造 + 开场触发
+  learner.ts   学生 system prompt 组装 + messages 构造
+  session.ts   会话循环（async generator, 产 SessionEvent）
+  storage.ts   fs 小工具（原子写、追加行、目录初始化）
+
+prompts/
+  teacher_rules.md
+  learner_novice.md / learner_mid.md / learner_critic.md
+
+data/
+  books/<slug>/manifest.json + sections/<id>.md
+  sessions/<sid>/meta.json + transcript.jsonl        （.gitignored）
+```
+
+只有 `data/books/example/` 提交入库，其它 slug 在 `.gitignore` 里。
+
+## 关键设计原则
+
+1. **唯一 LLM 入口 `callLLM(purpose, messages, opts)`**（`lib/llm.ts`）——所有 provider 切换、日志、限流都改这一个函数。参考 Socratopia 逆向报告 §2.1。
+2. **独立上下文**：教师和学生**各维护 messages 数组**，绝不共享。构造方向相反：教师 messages 里 `learner→user`，学生 messages 里 `teacher→user`。
+3. **文件即记忆**（§10.1）：书、rules、画像都是 md 文件，system prompt 组装时整份读入。不引 RAG、不引向量库。
+4. **拼接式 prompt**：段落间用 `\n\n---\n\n` 分隔（§10.1）。教师 8 段，学生 5 段。
+5. **本节原文只喂教师**：学生看不到——学生的困惑就是这本书的困惑。这是"用 agent 审书"的核心。
+6. **引用协议 `〔§<id>｜前若干字〕`**：仅从 §3.1 里保留这一条结构化约束。V1 不做服务端 verbatim 校验，靠 prompt 铁律 + 人工审阅；V2 补 manifest 校验（§10.2）。
+7. **transcript.jsonl 一行一 turn**：`{turn, actor, text, ts}`。V2 审计 agent 直接吃这个文件。
+
+## 常用命令
+
+```bash
+# 首次
+pnpm install                # 或 npm install
+cp .env.example .env.local  # 填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+
+# 开发
+pnpm dev                    # http://localhost:3000
+
+# 构建
+pnpm build && pnpm start
+```
+
+## 加一本书
+
+1. 在 `data/books/<你的-slug>/` 下建目录（注意 `.gitignore` 默认只提交 `example`，其它 slug 在本地跑就好）
+2. 写 `manifest.json`：
+   ```json
+   {
+     "title": "...",
+     "author": "...",
+     "sections": [{ "id": "01", "title": "..." }]
+   }
+   ```
+3. 写 `sections/<id>.md`——一节一文件，纯 markdown。
+4. 重启不用，观察页 `/api/books` 是 dynamic 的。
+
+## V1 明确不做
+
+审计 agent / 审计报告页 · 批量跑整本 · 中断续跑 · 消息回滚 · 长期学生画像演化 · verbatim 引用校验 · 多用户 · PDF/EPUB 导入 · 教师改书。
+
+## 沟通风格（沿用旧约定）
+
+- **中文优先**，技术术语可英文。
+- "记录下来 / 写在盘上"意思是**写文件**。
+- 不啰嗦。不知道就说不知道。改动仓库任何现有文件前先确认。
+
+## 相关文档
+
+- `PLAN.md` — 本项目 V1 完整设计方案（跟这份 CLAUDE.md 对齐）
+- `REVERSE-ENGINEERING-REPORT.md` — Socratopia 71 KB 逆向报告，本项目所有"借鉴自 Socratopia"的模式都来自这里
+- `AI-DRIVEN-DEVELOPMENT-INSIGHTS.md` — 方法论姊妹篇
+- `CONVERSATION-CONTEXT.md` — 旧的 Socratopia 逆向讨论快照（**与本项目无关**）
