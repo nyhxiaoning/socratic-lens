@@ -23,6 +23,12 @@ type SessionEvent =
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
+type AuditEvent =
+  | { type: "audit_start"; sid: string }
+  | { type: "audit_chunk"; text: string }
+  | { type: "audit_done"; report: { raw: string } }
+  | { type: "audit_error"; message: string };
+
 const CITE_RE = /〔§([\w-]{1,32})(?:[｜|]([^〕\n]{0,120}))?〕/g;
 
 export default function Page() {
@@ -39,8 +45,15 @@ export default function Page() {
   const [error, setError] = useState<string>("");
   const [modalSection, setModalSection] = useState<{ id: string; text: string } | null>(null);
 
+  // 审计相关
+  const [auditText, setAuditText] = useState<string>("");
+  const [auditing, setAuditing] = useState<boolean>(false);
+  const [sessionDone, setSessionDone] = useState<boolean>(false);
+  const auditAbortRef = useRef<AbortController | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const auditRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch("/api/books")
@@ -76,6 +89,8 @@ export default function Page() {
     setError("");
     setMessages([]);
     setSid("");
+    setAuditText("");
+    setSessionDone(false);
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -159,13 +174,71 @@ export default function Page() {
         setError(ev.message);
         break;
       case "done":
-        // sid 已在 meta 时设置
+        setSessionDone(true);
         break;
     }
   }
 
   function stop() {
     abortRef.current?.abort();
+  }
+
+  async function runAudit() {
+    if (!sid) return;
+    setAuditText("");
+    setAuditing(true);
+    setError("");
+    const ctrl = new AbortController();
+    auditAbortRef.current = ctrl;
+    try {
+      const resp = await fetch(`/api/sessions/${sid}/audit`, {
+        method: "POST",
+        signal: ctrl.signal,
+      });
+      if (!resp.ok || !resp.body) {
+        throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const frames = buf.split("\n\n");
+        buf = frames.pop() ?? "";
+        for (const frame of frames) {
+          if (!frame.startsWith("data: ")) continue;
+          try {
+            const ev = JSON.parse(frame.slice(6)) as AuditEvent;
+            if (ev.type === "audit_chunk") {
+              setAuditText((prev) => prev + ev.text);
+              // 滚到底
+              queueMicrotask(() =>
+                auditRef.current?.scrollTo({ top: auditRef.current.scrollHeight }),
+              );
+            } else if (ev.type === "audit_done") {
+              setAuditText(ev.report.raw);
+            } else if (ev.type === "audit_error") {
+              setError(ev.message);
+            }
+          } catch {
+            // 忽略
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") {
+        setError((e as Error).message);
+      }
+    } finally {
+      setAuditing(false);
+      auditAbortRef.current = null;
+    }
+  }
+
+  function stopAudit() {
+    auditAbortRef.current?.abort();
   }
 
   async function openSection(id: string) {
@@ -316,20 +389,55 @@ export default function Page() {
           color: "var(--muted)",
           display: "flex",
           justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
         }}
       >
         <span>{sid ? `会话 ${sid}` : "尚未开始"}</span>
-        {sid && (
-          <a
-            href={`/api/sessions/${sid}`}
-            target="_blank"
-            style={{ color: "var(--accent)" }}
-            rel="noreferrer"
-          >
-            查看 transcript.jsonl
-          </a>
-        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {sid && sessionDone && !auditing && (
+            <button className="primary" onClick={runAudit}>
+              {auditText ? "重新审计" : "生成审计报告"}
+            </button>
+          )}
+          {auditing && (
+            <button className="danger" onClick={stopAudit}>
+              停止审计
+            </button>
+          )}
+          {sid && (
+            <a
+              href={`/api/sessions/${sid}`}
+              target="_blank"
+              style={{ color: "var(--accent)" }}
+              rel="noreferrer"
+            >
+              查看 transcript
+            </a>
+          )}
+        </div>
       </footer>
+
+      {(auditText || auditing) && (
+        <section
+          ref={auditRef}
+          style={{
+            marginTop: 12,
+            maxHeight: 480,
+            overflowY: "auto",
+            padding: 14,
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+          }}
+        >
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
+            审计报告{auditing && "（生成中…）"}
+          </div>
+          <AuditView raw={auditText} />
+        </section>
+      )}
 
       {modalSection && (
         <Modal onClose={() => setModalSection(null)} title={`§${modalSection.id} 原文`}>
@@ -471,4 +579,61 @@ function Modal({
       </div>
     </div>
   );
+}
+
+/** 把 ===TAG=== 分隔的审计报告分段渲染。流式过程中未完成的段会保持原始文本。 */
+function AuditView({ raw }: { raw: string }) {
+  const sections = parseAuditSections(raw);
+  if (sections.length === 0) {
+    return (
+      <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit" }}>
+        {raw || "…"}
+      </pre>
+    );
+  }
+  return (
+    <div>
+      {sections.map((s, i) => (
+        <div key={i} style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--accent)",
+              marginBottom: 4,
+              letterSpacing: 0.5,
+            }}
+          >
+            {SECTION_LABELS[s.tag] ?? s.tag}
+          </div>
+          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.body}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const SECTION_LABELS: Record<string, string> = {
+  VERDICT: "一句话结论",
+  CLARITY: "表达清晰度问题",
+  HARD_SPOTS: "学生真正卡住的点",
+  INCONSISTENCY: "教师讲的 vs 原文（关键）",
+  SUGGESTIONS: "对书本身的修改建议",
+};
+
+function parseAuditSections(raw: string): { tag: string; body: string }[] {
+  const re = /^===([A-Z_]+)===\s*\r?\n/gm;
+  const out: { tag: string; body: string }[] = [];
+  const matches: { tag: string; start: number; contentStart: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    matches.push({ tag: m[1], start: m.index, contentStart: m.index + m[0].length });
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    if (cur.tag === "END") continue;
+    const nextStart = matches[i + 1]?.start ?? raw.length;
+    out.push({ tag: cur.tag, body: raw.slice(cur.contentStart, nextStart).trim() });
+  }
+  return out;
 }
