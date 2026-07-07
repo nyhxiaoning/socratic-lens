@@ -187,6 +187,53 @@ export default function Page() {
     [bookSlug, sectionId, learnerId, running],
   );
 
+  /** 把某个已有会话的 transcript + 教练分析载入到对话栏，只读，不起新流。 */
+  async function loadSessionIntoView(sidToLoad: string) {
+    setError("");
+    setAuditText("");
+    setShowAuditPanel(false);
+    setSessionDone(false);
+    try {
+      const r = await fetch(`/api/sessions/${sidToLoad}`);
+      const d = await r.json();
+      if (!d.meta) {
+        setError(d.error || "会话不存在");
+        return;
+      }
+      setSid(sidToLoad);
+      setMessages(
+        (d.turns as { turn: number; actor: "teacher" | "learner"; text: string }[])
+          .map((t) => ({ turn: t.turn, actor: t.actor, text: t.text })),
+      );
+      setCoachHistory(
+        (d.teacherCoach as { turn: number; analysis: CoachAnalysis }[])
+          .map((c) => ({ turn: c.turn, analysis: c.analysis })),
+      );
+      setLearnerCoachHistory(
+        (d.learnerCoach as { turn: number; analysis: LearnerCoachAnalysis }[])
+          .map((c) => ({ turn: c.turn, analysis: c.analysis })),
+      );
+      setBookSlug(d.meta.bookSlug);
+      setSectionId(d.meta.sectionId);
+      setLearnerId(d.meta.learnerId);
+      setPacing(d.meta.pacing || "normal");
+      if (
+        d.meta.windowStartPage !== undefined &&
+        d.meta.windowEndPage !== undefined
+      ) {
+        setWindowInfo({
+          startPage: d.meta.windowStartPage,
+          endPage: d.meta.windowEndPage,
+          totalPages: 0,
+        });
+      } else {
+        setWindowInfo(null);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   async function start(resumeSid?: string) {
     setError("");
     setMessages([]);
@@ -847,6 +894,10 @@ export default function Page() {
           items={historyItems}
           books={books}
           onClose={() => setShowHistory(false)}
+          onView={(sid) => {
+            setShowHistory(false);
+            loadSessionIntoView(sid);
+          }}
           onResume={(sid) => {
             setShowHistory(false);
             start(sid);
@@ -1363,11 +1414,13 @@ function HistoryDrawer({
   items,
   books,
   onClose,
+  onView,
   onResume,
 }: {
   items: SessionListItem[];
   books: BookSummary[];
   onClose: () => void;
+  onView: (sid: string) => void;
   onResume: (sid: string) => void;
 }) {
   const bookTitleOf = (slug: string) => books.find((b) => b.slug === slug)?.title ?? slug;
@@ -1431,18 +1484,23 @@ function HistoryDrawer({
             <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, fontFamily: "monospace" }}>
               {s.sid}
             </div>
-            <div style={{ marginTop: 6, display: "flex", gap: 6, justifyContent: "flex-end" }}>
+            <div style={{ marginTop: 6, display: "flex", gap: 6, justifyContent: "flex-end", alignItems: "center" }}>
               <a
                 href={`/api/sessions/${s.sid}`}
                 target="_blank"
                 rel="noreferrer"
-                style={{ fontSize: 11, color: "var(--accent)", alignSelf: "center" }}
+                style={{ fontSize: 11, color: "var(--muted)" }}
+                title="原始 JSON（新标签页）"
               >
-                查看
+                原始
               </a>
+              <button style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => onView(s.sid)}>
+                载入
+              </button>
               {(s.status === "aborted" || s.status === "errored") &&
                 (s.turnsSoFar ?? 0) < (s.maxTurns ?? 0) && (
                   <button
+                    className="primary"
                     style={{ padding: "2px 8px", fontSize: 11 }}
                     onClick={() => onResume(s.sid)}
                   >
