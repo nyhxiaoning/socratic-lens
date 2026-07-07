@@ -8,7 +8,13 @@
 
 - **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。
 - **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
+- **教师教练 TAE**（§3.4）：每轮末尾后台跑一次 JSON 分析，注入下一轮教师 system prompt。默认开。
+- **学生教练**：结构镜像教师教练，判断学生"是不是真懂 / 有没有用预训练作弊 / 画像有没有漂"，注入下一轮学生 system prompt。默认开。
 - **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。按 `===TAG===` 5 段协议出**对书本身的诊断**（VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS）。落盘到 `data/audits/<aid>/report.md`。
+
+**长会话支持**：轮数最高 120。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
+
+**进度保持**：所有状态每轮末落盘（transcript.jsonl append-only、coach.jsonl / learner_coach.jsonl、meta.json）。软件重启：`/api/session` 首次调用时跑 `reconcileOnStartup()`，把状态残留为 `running` 的老会话改成 `aborted`。观察页"历史"抽屉可以列出所有会话、查看 transcript、对未完成的会话点"继续"从最后一个完整轮次续跑。
 
 两 agent **独立上下文**：教师视角里学生说的话是 `user`，学生视角里教师说的话是 `user`——参考 `REVERSE-ENGINEERING-REPORT.md` §3.1。
 
@@ -35,17 +41,20 @@ app/
   api/audits/[aid]/route.ts         GET 单次审计的 meta + 报告
 
 lib/
-  llm.ts       唯一 callLLM(purpose, messages, opts) 入口
+  llm.ts       唯一 callLLM(purpose, messages, opts) 入口（含 jsonMode）
   book.ts      Book/Section 读取 + 每节字数统计
-  teacher.ts   教师 system prompt 组装 + messages 构造 + 开场触发
-  learner.ts   学生 system prompt 组装 + messages 构造
-  session.ts   会话循环（async generator, 产 SessionEvent）
+  teacher.ts   教师 system prompt 组装（含 pacing + 教练分析注入）
+  learner.ts   学生 system prompt 组装（含学生教练分析注入）
+  coach.ts     教师教练 + 学生教练：analyze* / render*Block
+  session.ts   会话循环 + 滑动摘要 + 双教练并行 + resume + reconcileOnStartup
   audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + ===TAG=== 解析 + 落盘
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
 
 prompts/
   teacher_rules.md
   learner_novice.md / learner_mid.md / learner_critic.md
+  coach_rules.md              教师教练 JSON schema
+  learner_coach_rules.md      学生教练 JSON schema
   audit_rules.md
 
 scripts/
@@ -53,7 +62,12 @@ scripts/
 
 data/
   books/<slug>/manifest.json + sections/<id>.md
-  sessions/<sid>/meta.json + transcript.jsonl                （.gitignored）
+  sessions/<sid>/
+    meta.json                       (含 pacing / turnsSoFar / teacherSummary 等)
+    transcript.jsonl                (一行一 turn, append-only)
+    coach.jsonl                     (教师教练每轮 JSON)
+    learner_coach.jsonl             (学生教练每轮 JSON)
+                                                             （data/sessions .gitignored）
   audits/<aid>/meta.json + report.md                         （.gitignored）
   audits/history.jsonl                                       （.gitignored 全局审计索引）
 ```
@@ -106,7 +120,7 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 
 ## V1 明确不做
 
-批量跑整本 · 中断续跑 · 消息回滚 · 长期学生画像演化 · verbatim 引用校验 · 多用户 · PDF/EPUB 导入 · 教师改书。
+消息回滚 · 长期学生画像演化 · verbatim 引用校验 · 多用户 · PDF/EPUB 导入 · 教师改书。
 
 ## 沟通风格（沿用旧约定）
 
