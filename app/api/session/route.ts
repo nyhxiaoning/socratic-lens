@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { reconcileOnStartup, runSession, type SessionEvent } from "@/lib/session";
-import type { LearnerId, Pacing } from "@/lib/teacher";
+import type { LearnerId, Pacing, TeachingMode } from "@/lib/teacher";
 
 export const runtime = "nodejs";
 // Node fetch/SSE 需要长连接；禁用静态优化
@@ -26,6 +26,8 @@ type StartBody = {
   coachEnabled?: boolean;
   learnerCoachEnabled?: boolean;
   maxTurns?: number;
+  teachingMode?: TeachingMode;
+  commentariesEnabled?: boolean;
   /** 若给，续跑这个 sid（bookSlug/sectionId/learnerId 会被 meta 里的覆盖） */
   resumeSid?: string;
 };
@@ -54,10 +56,19 @@ export async function POST(req: NextRequest) {
   }
 
   const maxTurns = Math.min(Math.max(body.maxTurns ?? 8, 1), 200);
+  const teachingMode: TeachingMode =
+    body.teachingMode === "close_reading" ? "close_reading" : "socratic";
+  // 句读模式下 pacing 无意义（三档都塌成一档），硬编码 normal 保 resume 兼容
   const pacing: Pacing =
-    body.pacing === "thorough" || body.pacing === "express" ? body.pacing : "normal";
+    teachingMode === "close_reading"
+      ? "normal"
+      : body.pacing === "thorough" || body.pacing === "express"
+      ? body.pacing
+      : "normal";
   const coachEnabled = body.coachEnabled !== false;
   const learnerCoachEnabled = body.learnerCoachEnabled !== false;
+  // socratic 下 commentaries 强制 false，避免误传
+  const commentariesEnabled = teachingMode === "close_reading" && body.commentariesEnabled === true;
   const abortCtrl = new AbortController();
   req.signal.addEventListener("abort", () => abortCtrl.abort(), { once: true });
 
@@ -72,6 +83,8 @@ export async function POST(req: NextRequest) {
           coachEnabled,
           learnerCoachEnabled,
           maxTurns,
+          teachingMode,
+          commentariesEnabled,
           signal: abortCtrl.signal,
           resumeSid: body.resumeSid,
         })) {

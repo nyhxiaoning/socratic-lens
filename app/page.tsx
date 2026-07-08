@@ -28,6 +28,12 @@ const PACINGS: { id: Pacing; label: string; desc: string }[] = [
   { id: "express", label: "快", desc: "跳过基础，直奔核心" },
 ];
 
+type TeachingMode = "socratic" | "close_reading";
+const TEACHING_MODES: { id: TeachingMode; label: string; desc: string; badge: string }[] = [
+  { id: "socratic", label: "苏格拉底", desc: "默认模式，一节一节讲现代书", badge: "📖" },
+  { id: "close_reading", label: "句读", desc: "讲经典，一半句一半句读，可选启用注疏", badge: "🈶" },
+];
+
 type CoachAnalysis = {
   companionBehavior: string;
   learnerEngagement: string;
@@ -105,6 +111,26 @@ type SessionListItem = {
   status: string;
   maxTurns?: number;
   turnsSoFar?: number;
+  teachingMode?: TeachingMode;
+  commentariesEnabled?: boolean;
+};
+
+type AuditMode = "book" | "teaching" | "playbook";
+const AUDIT_MODES: { id: AuditMode; label: string; desc: string; badge: string }[] = [
+  { id: "book", label: "书", desc: "审书本身，找原文的空洞与不清楚", badge: "📖" },
+  { id: "teaching", label: "教学", desc: "诊断教师表现，对齐教师硬规则", badge: "🎓" },
+  { id: "playbook", label: "教师改进方案", desc: "书不动的前提下，下次怎么教得更好", badge: "🛠" },
+];
+
+type AuditHistoryItem = {
+  aid: string;
+  bookSlug: string;
+  sectionIds: string[];
+  learnerIds: string[];
+  mode: AuditMode;
+  sidCount: number;
+  verdict: string;
+  ts: number;
 };
 
 const CITE_RE = /〔§([\w-]{1,32})(?:[｜|]([^〕\n]{0,120}))?〕/g;
@@ -116,6 +142,8 @@ export default function Page() {
   const [sectionId, setSectionId] = useState<string>("");
   const [learnerId, setLearnerId] = useState<LearnerId>("novice");
   const [pacing, setPacing] = useState<Pacing>("normal");
+  const [teachingMode, setTeachingMode] = useState<TeachingMode>("socratic");
+  const [commentariesEnabled, setCommentariesEnabled] = useState<boolean>(false);
   const [coachEnabled, setCoachEnabled] = useState<boolean>(true);
   const [learnerCoachEnabled, setLearnerCoachEnabled] = useState<boolean>(true);
   const [maxTurns, setMaxTurns] = useState<number>(6);
@@ -129,6 +157,8 @@ export default function Page() {
   const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
   const [showHistory, setShowHistory] = useState<boolean>(false);
   const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
+  const [showAuditHistory, setShowAuditHistory] = useState<boolean>(false);
+  const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
   const [windowInfo, setWindowInfo] = useState<{
     startPage: number;
     endPage: number;
@@ -136,6 +166,10 @@ export default function Page() {
   } | null>(null);
   const [running, setRunning] = useState(false);
   const [sid, setSid] = useState<string>("");
+  // 当前载入/进行中会话的状态——用来判断能不能"继续"
+  const [sessionStatus, setSessionStatus] = useState<string>("");
+  const [sessionMaxTurns, setSessionMaxTurns] = useState<number>(0);
+  const [sessionTurnsSoFar, setSessionTurnsSoFar] = useState<number>(0);
   const [error, setError] = useState<string>("");
   const [modalSection, setModalSection] = useState<{ id: string; text: string } | null>(null);
 
@@ -146,6 +180,9 @@ export default function Page() {
   const [showAuditPanel, setShowAuditPanel] = useState<boolean>(false);
   const [existingSessions, setExistingSessions] = useState<SessionListItem[]>([]);
   const [pickedSids, setPickedSids] = useState<Set<string>>(new Set());
+  const [auditMode, setAuditMode] = useState<AuditMode>("book");
+  // 当前面板显示的报告属于哪种模式（跑新审计或载入历史都会同步）
+  const [currentAuditMode, setCurrentAuditMode] = useState<AuditMode>("book");
   const auditAbortRef = useRef<AbortController | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -187,6 +224,24 @@ export default function Page() {
     [bookSlug, sectionId, learnerId, running],
   );
 
+  // 能不能"继续"跑当前载入/停下的会话：
+  // - 已有 sid（载入或刚跑过）
+  // - 不在跑、不在审计
+  // - 已跑轮数 < maxTurns
+  // - 状态不是 done（done 是自然跑完，没剩下的轮数）
+  const canResume = useMemo(
+    () =>
+      Boolean(
+        sid &&
+          !running &&
+          !auditing &&
+          sessionMaxTurns > 0 &&
+          sessionTurnsSoFar < sessionMaxTurns &&
+          sessionStatus !== "done",
+      ),
+    [sid, running, auditing, sessionStatus, sessionMaxTurns, sessionTurnsSoFar],
+  );
+
   /** 把某个已有会话的 transcript + 教练分析载入到对话栏，只读，不起新流。 */
   async function loadSessionIntoView(sidToLoad: string) {
     setError("");
@@ -201,6 +256,11 @@ export default function Page() {
         return;
       }
       setSid(sidToLoad);
+      setSessionStatus(d.meta.status || "");
+      setSessionMaxTurns(d.meta.maxTurns ?? 0);
+      const turnsArr = (d.turns ?? []) as { turn: number }[];
+      const inferred = turnsArr.length > 0 ? Math.max(...turnsArr.map((t) => t.turn)) : 0;
+      setSessionTurnsSoFar(d.meta.turnsSoFar ?? inferred);
       setMessages(
         (d.turns as { turn: number; actor: "teacher" | "learner"; text: string }[])
           .map((t) => ({ turn: t.turn, actor: t.actor, text: t.text })),
@@ -217,6 +277,8 @@ export default function Page() {
       setSectionId(d.meta.sectionId);
       setLearnerId(d.meta.learnerId);
       setPacing(d.meta.pacing || "normal");
+      setTeachingMode((d.meta.teachingMode as TeachingMode) || "socratic");
+      setCommentariesEnabled(!!d.meta.commentariesEnabled);
       if (
         d.meta.windowStartPage !== undefined &&
         d.meta.windowEndPage !== undefined
@@ -240,6 +302,9 @@ export default function Page() {
     setCoachHistory([]);
     setLearnerCoachHistory([]);
     setSid("");
+    setSessionStatus("");
+    setSessionTurnsSoFar(0);
+    setSessionMaxTurns(resumeSid ? 0 : maxTurns);
     setAuditText("");
     setSessionDone(false);
     setShowAuditPanel(false);
@@ -255,6 +320,11 @@ export default function Page() {
         const d = await r.json();
         if (d.meta) {
           setSid(resumeSid);
+          setSessionStatus(d.meta.status || "");
+          setSessionMaxTurns(d.meta.maxTurns ?? 0);
+          const turnsArr = (d.turns ?? []) as { turn: number }[];
+          const inferred = turnsArr.length > 0 ? Math.max(...turnsArr.map((t) => t.turn)) : 0;
+          setSessionTurnsSoFar(d.meta.turnsSoFar ?? inferred);
           setMessages(
             (d.turns as { turn: number; actor: "teacher" | "learner"; text: string }[])
               .map((t) => ({ turn: t.turn, actor: t.actor, text: t.text })),
@@ -272,6 +342,8 @@ export default function Page() {
           setSectionId(d.meta.sectionId);
           setLearnerId(d.meta.learnerId);
           setPacing(d.meta.pacing || "normal");
+          setTeachingMode((d.meta.teachingMode as TeachingMode) || "socratic");
+          setCommentariesEnabled(!!d.meta.commentariesEnabled);
           if (
             d.meta.windowStartPage !== undefined &&
             d.meta.windowEndPage !== undefined
@@ -296,7 +368,17 @@ export default function Page() {
         body: JSON.stringify(
           resumeSid
             ? { resumeSid, pacing, coachEnabled, learnerCoachEnabled, maxTurns }
-            : { bookSlug, sectionId, learnerId, pacing, coachEnabled, learnerCoachEnabled, maxTurns },
+            : {
+                bookSlug,
+                sectionId,
+                learnerId,
+                pacing,
+                coachEnabled,
+                learnerCoachEnabled,
+                maxTurns,
+                teachingMode,
+                commentariesEnabled,
+              },
         ),
         signal: ctrl.signal,
       });
@@ -338,6 +420,8 @@ export default function Page() {
     switch (ev.type) {
       case "meta":
         setSid(ev.meta.sid);
+        setSessionStatus("running");
+        if (ev.meta.turnsSoFar !== undefined) setSessionTurnsSoFar(ev.meta.turnsSoFar);
         break;
       case "turn_start":
         setMessages((prev) => [...prev, { turn: ev.turn, actor: ev.actor, text: "" }]);
@@ -365,12 +449,17 @@ export default function Page() {
           }
           return copy;
         });
+        // 学生说完才算一整轮走完
+        if (ev.actor === "learner") setSessionTurnsSoFar(ev.turn);
         break;
       case "error":
         setError(ev.message);
+        setSessionStatus("errored");
         break;
       case "done":
         setSessionDone(true);
+        // 会话流走到 done 事件说明服务端标了 done 或 aborted——按 turnsSoFar 反推
+        setSessionStatus((prev) => (prev === "errored" ? "errored" : "done"));
         break;
       case "coach":
         if (ev.side === "teacher") {
@@ -402,11 +491,16 @@ export default function Page() {
     abortRef.current?.abort();
     // 手动停止后立刻允许审计（不等 SSE 的 done——它多半到不了）
     setSessionDone(true);
+    setSessionStatus("aborted");
   }
 
   async function openAuditPanel() {
     setShowAuditPanel(true);
     setPickedSids(sid ? new Set([sid]) : new Set());
+    // 句读会话默认建议用 teaching 模式（audit_book 的"缺什么"语义在句读下会错位）
+    if (teachingMode === "close_reading") {
+      setAuditMode("teaching");
+    }
     if (!bookSlug) return;
     try {
       const r = await fetch(`/api/sessions?bookSlug=${encodeURIComponent(bookSlug)}`);
@@ -425,13 +519,14 @@ export default function Page() {
     setAuditText("");
     setAuditing(true);
     setError("");
+    setCurrentAuditMode(auditMode);
     const ctrl = new AbortController();
     auditAbortRef.current = ctrl;
     try {
       const resp = await fetch(`/api/audits`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sids }),
+        body: JSON.stringify({ sids, mode: auditMode }),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -502,6 +597,40 @@ export default function Page() {
     }
   }
 
+  async function openAuditHistory() {
+    setShowAuditHistory(true);
+    try {
+      const q = bookSlug ? `?bookSlug=${encodeURIComponent(bookSlug)}` : "";
+      const r = await fetch(`/api/audits${q}`);
+      const d = await r.json();
+      setAuditHistory(d.audits || []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 把一次已存的审计报告载入到当前面板，只读对照。 */
+  async function loadAuditIntoView(aid: string) {
+    setError("");
+    try {
+      const r = await fetch(`/api/audits/${aid}`);
+      const d = await r.json();
+      if (!d.meta) {
+        setError(d.error || "审计不存在");
+        return;
+      }
+      setAuditText((d.report?.raw as string) || "");
+      setCurrentAuditMode((d.meta.mode as AuditMode) || "book");
+      setShowAuditPanel(false);
+      // 滚到审计区
+      queueMicrotask(() =>
+        auditRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
       <header style={{ marginBottom: 12 }}>
@@ -566,18 +695,80 @@ export default function Page() {
           </select>
         </Field>
 
-        <Field label="节奏">
+        {teachingMode === "close_reading" ? (
+          <Field label="节奏">
+            <span
+              style={{
+                fontSize: 11,
+                color: "#888",
+                padding: "4px 4px",
+                fontStyle: "italic",
+              }}
+              title="句读节奏由方法本身决定：逐字停、遇关键字才拆。thorough/normal/express 在此不适用。"
+            >
+              由句读方法决定
+            </span>
+          </Field>
+        ) : (
+          <Field label="节奏">
+            <select
+              value={pacing}
+              onChange={(e) => setPacing(e.target.value as Pacing)}
+              disabled={running}
+            >
+              {PACINGS.map((p) => (
+                <option key={p.id} value={p.id} title={p.desc}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        <Field label="教学模式">
           <select
-            value={pacing}
-            onChange={(e) => setPacing(e.target.value as Pacing)}
+            value={teachingMode}
+            onChange={(e) => {
+              const m = e.target.value as TeachingMode;
+              setTeachingMode(m);
+              if (m === "socratic") setCommentariesEnabled(false);
+              if (m === "close_reading") setPacing("normal");
+            }}
             disabled={running}
+            title="苏格拉底：默认；句读：讲经典，一半句一半句读"
           >
-            {PACINGS.map((p) => (
-              <option key={p.id} value={p.id} title={p.desc}>
-                {p.label}
+            {TEACHING_MODES.map((m) => (
+              <option key={m.id} value={m.id} title={m.desc}>
+                {m.badge} {m.label}
               </option>
             ))}
           </select>
+        </Field>
+
+        <Field label="注疏">
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 12,
+              padding: "2px 4px",
+              opacity: teachingMode === "close_reading" ? 1 : 0.4,
+            }}
+            title={
+              teachingMode === "close_reading"
+                ? "启用后教师只能引用 data/books/<slug>/commentaries/<sid>.md 里的家和字；文件不存在则退回不引"
+                : "仅句读模式可用"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={commentariesEnabled}
+              onChange={(e) => setCommentariesEnabled(e.target.checked)}
+              disabled={running || teachingMode !== "close_reading"}
+            />
+            <span>启用</span>
+          </label>
         </Field>
 
         <Field label="教练">
@@ -625,6 +816,7 @@ export default function Page() {
         {!running ? (
           <>
             <button onClick={openHistory}>历史…</button>
+            <button onClick={openAuditHistory}>审计历史…</button>
             <button className="primary" onClick={() => start()} disabled={!canStart}>
               开始
             </button>
@@ -809,6 +1001,15 @@ export default function Page() {
           )}
         </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {canResume && (
+            <button
+              className="primary"
+              onClick={() => start(sid)}
+              title={`从第 ${sessionTurnsSoFar + 1} 轮起继续（共 ${sessionMaxTurns} 轮）`}
+            >
+              继续（{sessionTurnsSoFar}/{sessionMaxTurns}）
+            </button>
+          )}
           {sid && !running && !auditing && (
             <button className="primary" onClick={openAuditPanel}>
               审计…
@@ -838,6 +1039,8 @@ export default function Page() {
           currentSid={sid}
           sessions={existingSessions}
           picked={pickedSids}
+          mode={auditMode}
+          onModeChange={setAuditMode}
           onTogglePick={(s) => {
             setPickedSids((prev) => {
               const copy = new Set(prev);
@@ -873,7 +1076,12 @@ export default function Page() {
               justifyContent: "space-between",
             }}
           >
-            <span>审计报告{auditing && "（生成中…）"}</span>
+            <span>
+              {AUDIT_MODES.find((m) => m.id === currentAuditMode)?.badge ?? "📖"}{" "}
+              {AUDIT_MODES.find((m) => m.id === currentAuditMode)?.label ?? "书"}
+              {" · "}
+              审计报告{auditing && "（生成中…）"}
+            </span>
             {!auditing && (
               <button
                 onClick={() => {
@@ -885,7 +1093,7 @@ export default function Page() {
               </button>
             )}
           </div>
-          <AuditView raw={auditText} />
+          <AuditView raw={auditText} mode={currentAuditMode} />
         </section>
       )}
 
@@ -901,6 +1109,19 @@ export default function Page() {
           onResume={(sid) => {
             setShowHistory(false);
             start(sid);
+          }}
+        />
+      )}
+
+      {showAuditHistory && (
+        <AuditHistoryDrawer
+          items={auditHistory}
+          books={books}
+          currentBookSlug={bookSlug}
+          onClose={() => setShowAuditHistory(false)}
+          onView={(aid) => {
+            setShowAuditHistory(false);
+            loadAuditIntoView(aid);
           }}
         />
       )}
@@ -959,6 +1180,8 @@ function AuditPicker({
   currentSid,
   sessions,
   picked,
+  mode,
+  onModeChange,
   onTogglePick,
   onCancel,
   onSubmit,
@@ -967,6 +1190,8 @@ function AuditPicker({
   currentSid: string;
   sessions: SessionListItem[];
   picked: Set<string>;
+  mode: AuditMode;
+  onModeChange: (m: AuditMode) => void;
   onTogglePick: (sid: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
@@ -980,6 +1205,12 @@ function AuditPicker({
     }
     return map;
   }, [sessions]);
+
+  // 所选会话是否包含句读——决定要不要弹提示
+  const pickedHasCloseReading = useMemo(
+    () => sessions.some((s) => picked.has(s.sid) && s.teachingMode === "close_reading"),
+    [sessions, picked],
+  );
 
   // 按书里的 section 顺序展示
   const orderedSectionIds = book?.sections.map((s) => s.id) ?? [];
@@ -999,6 +1230,41 @@ function AuditPicker({
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
           勾选后点"开始审计"。跨多节 = 合审。已选 {picked.size} 个
         </div>
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>审计模式</div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {AUDIT_MODES.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => onModeChange(m.id)}
+              className={mode === m.id ? "primary" : ""}
+              title={m.desc}
+              style={{ padding: "6px 10px", fontSize: 12, flex: 1 }}
+            >
+              {m.badge} {m.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+          {AUDIT_MODES.find((m) => m.id === mode)?.desc}
+        </div>
+        {pickedHasCloseReading && mode === "book" && (
+          <div
+            style={{
+              marginTop: 6,
+              padding: "6px 8px",
+              fontSize: 11,
+              color: "var(--danger)",
+              background: "var(--panel)",
+              border: "1px solid var(--danger)",
+              borderRadius: 4,
+            }}
+          >
+            所选包含<strong>句读</strong>会话——用"书"模式审计会把教师的字面拆解误判为"原文补丁"，建议改用<strong>教学</strong>或<strong>教师改进方案</strong>模式。
+          </div>
+        )}
       </div>
 
       <div
@@ -1046,7 +1312,11 @@ function AuditPicker({
                     </span>
                     <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
                       {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
-                      {s.status}
+                      <TeachingModeBadge
+                        mode={s.teachingMode}
+                        commentariesEnabled={s.commentariesEnabled}
+                      />{" "}
+                      · {s.status}
                     </span>
                   </label>
                 ))}
@@ -1186,8 +1456,9 @@ function Modal({
 }
 
 /** 把 ===TAG=== 分隔的审计报告分段渲染。流式过程中未完成的段会保持原始文本。 */
-function AuditView({ raw }: { raw: string }) {
+function AuditView({ raw, mode }: { raw: string; mode: AuditMode }) {
   const sections = parseAuditSections(raw);
+  const labels = SECTION_LABELS_BY_MODE[mode] ?? SECTION_LABELS_BY_MODE.book;
   if (sections.length === 0) {
     return (
       <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit" }}>
@@ -1208,7 +1479,7 @@ function AuditView({ raw }: { raw: string }) {
               letterSpacing: 0.5,
             }}
           >
-            {SECTION_LABELS[s.tag] ?? s.tag}
+            {labels[s.tag] ?? s.tag}
           </div>
           <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.body}</div>
         </div>
@@ -1217,12 +1488,29 @@ function AuditView({ raw }: { raw: string }) {
   );
 }
 
-const SECTION_LABELS: Record<string, string> = {
-  VERDICT: "一句话结论",
-  CLARITY: "表达清晰度问题",
-  HARD_SPOTS: "学生真正卡住的点",
-  INCONSISTENCY: "教师讲的 vs 原文（关键）",
-  SUGGESTIONS: "对书本身的修改建议",
+const SECTION_LABELS_BY_MODE: Record<AuditMode, Record<string, string>> = {
+  book: {
+    VERDICT: "一句话结论",
+    CLARITY: "表达清晰度问题",
+    HARD_SPOTS: "学生真正卡住的点",
+    INCONSISTENCY: "教师讲的 vs 原文（关键）",
+    SUGGESTIONS: "对书本身的修改建议",
+  },
+  teaching: {
+    VERDICT: "一句话结论",
+    STRENGTHS: "教师做对的动作",
+    VIOLATIONS: "违反教师硬规则",
+    MISSED_MOMENTS: "错过的信号",
+    PACING_JUDGMENT: "节奏 vs 画像",
+    CITATION_HYGIENE: "引用健康度",
+  },
+  playbook: {
+    VERDICT: "一句话结论",
+    BOOK_TRAPS: "原文注定卡人的地方",
+    PLAYBOOK_FOR_NEXT_RUN: "下一次的动作序列",
+    RESPONSE_PATCHES: "针对学生反应的模板",
+    WINNING_MOVE: "本次做对的一招（下次照做）",
+  },
 };
 
 function parseAuditSections(raw: string): { tag: string; body: string }[] {
@@ -1476,6 +1764,7 @@ function HistoryDrawer({
             </div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
               §{s.sectionId} · {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+              <TeachingModeBadge mode={s.teachingMode} commentariesEnabled={s.commentariesEnabled} /> ·{" "}
               <StatusBadge status={s.status} /> ·{" "}
               <span>
                 {s.turnsSoFar ?? "?"} / {s.maxTurns ?? "?"} 轮
@@ -1497,8 +1786,8 @@ function HistoryDrawer({
               <button style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => onView(s.sid)}>
                 载入
               </button>
-              {(s.status === "aborted" || s.status === "errored") &&
-                (s.turnsSoFar ?? 0) < (s.maxTurns ?? 0) && (
+              {s.status !== "done" &&
+                (s.turnsSoFar ?? 0) < (s.maxTurns ?? Number.POSITIVE_INFINITY) && (
                   <button
                     className="primary"
                     style={{ padding: "2px 8px", fontSize: 11 }}
@@ -1507,6 +1796,137 @@ function HistoryDrawer({
                     继续
                   </button>
                 )}
+            </div>
+          </div>
+        ))}
+      </aside>
+    </div>
+  );
+}
+
+function AuditHistoryDrawer({
+  items,
+  books,
+  currentBookSlug,
+  onClose,
+  onView,
+}: {
+  items: AuditHistoryItem[];
+  books: BookSummary[];
+  currentBookSlug: string;
+  onClose: () => void;
+  onView: (aid: string) => void;
+}) {
+  const bookTitleOf = (slug: string) => books.find((b) => b.slug === slug)?.title ?? slug;
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        justifyContent: "flex-end",
+        zIndex: 100,
+      }}
+    >
+      <aside
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--panel)",
+          border: "1px solid var(--border)",
+          width: 560,
+          maxWidth: "92vw",
+          height: "100vh",
+          padding: 16,
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+          <strong>
+            审计历史
+            {currentBookSlug && (
+              <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: 8 }}>
+                · 仅显示《{bookTitleOf(currentBookSlug)}》
+              </span>
+            )}
+          </strong>
+          <button onClick={onClose}>关闭</button>
+        </div>
+        {items.length === 0 && (
+          <div style={{ color: "var(--muted)", padding: 30, textAlign: "center" }}>
+            这本书还没有历史审计。
+          </div>
+        )}
+        {items.map((a) => (
+          <div
+            key={a.aid}
+            style={{
+              padding: 10,
+              marginBottom: 8,
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "var(--bg)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                <span
+                  title={AUDIT_MODES.find((m) => m.id === a.mode)?.desc ?? ""}
+                  style={{ fontWeight: 600, color: "var(--accent)", marginRight: 6 }}
+                >
+                  {AUDIT_MODES.find((m) => m.id === a.mode)?.badge ?? "📖"}{" "}
+                  {AUDIT_MODES.find((m) => m.id === a.mode)?.label ?? "书"}
+                </span>
+                {a.sectionIds.length > 0
+                  ? a.sectionIds.map((s) => `§${s}`).join(" / ")
+                  : "?"}
+                {" · "}
+                <span title="参与本次审计的所有学生画像">
+                  {a.learnerIds && a.learnerIds.length > 0
+                    ? a.learnerIds
+                        .map((l) => LEARNERS.find((x) => x.id === l)?.label ?? l)
+                        .join(" + ")
+                    : "?"}
+                </span>
+                {" · "}
+                <span>{a.sidCount} 会话</span>
+              </div>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                {new Date(a.ts).toLocaleString("zh-CN")}
+              </span>
+            </div>
+            <div
+              style={{
+                fontSize: 13,
+                marginTop: 6,
+                color: "var(--text)",
+                wordBreak: "break-word",
+              }}
+              title={a.verdict}
+            >
+              {a.verdict || <span style={{ color: "var(--muted)" }}>（无 VERDICT）</span>}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4, fontFamily: "monospace" }}>
+              {a.aid}
+            </div>
+            <div style={{ marginTop: 6, display: "flex", gap: 6, justifyContent: "flex-end", alignItems: "center" }}>
+              <a
+                href={`/api/audits/${a.aid}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: 11, color: "var(--muted)" }}
+                title="原始 JSON（新标签页）"
+              >
+                原始
+              </a>
+              <button
+                className="primary"
+                style={{ padding: "2px 8px", fontSize: 11 }}
+                onClick={() => onView(a.aid)}
+              >
+                载入对照
+              </button>
             </div>
           </div>
         ))}
@@ -1535,4 +1955,23 @@ function StatusBadge({ status }: { status: string }) {
             ? "报错"
             : status;
   return <span style={{ color }}>{label}</span>;
+}
+
+function TeachingModeBadge({
+  mode,
+  commentariesEnabled,
+}: {
+  mode?: string;
+  commentariesEnabled?: boolean;
+}) {
+  const m = (mode || "socratic") as TeachingMode;
+  const info = TEACHING_MODES.find((x) => x.id === m);
+  const suffix =
+    m === "close_reading" ? (commentariesEnabled ? " · +注" : " · 无注") : "";
+  return (
+    <span title={info?.desc ?? ""}>
+      {info?.badge ?? "📖"} {info?.label ?? m}
+      {suffix}
+    </span>
+  );
 }

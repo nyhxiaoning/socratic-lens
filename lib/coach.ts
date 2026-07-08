@@ -1,7 +1,9 @@
 import path from "node:path";
 import { callLLM, type LLMMessage, type Purpose } from "./llm";
+import { parseLenientJson } from "./json-repair";
 import { PROMPTS_ROOT, readText } from "./storage";
 import type { Turn } from "./session";
+import type { TeachingMode } from "./teacher";
 
 /** 与 prompts/coach_rules.md 严格对齐（教师教练）。 */
 export type CoachAnalysis = {
@@ -10,7 +12,9 @@ export type CoachAnalysis = {
     | "looping"
     | "drifting"
     | "criticizing_author"
-    | "vague_answers";
+    | "vague_answers"
+    | "too_fast_for_persona"
+    | "extending_beyond_text";
   learnerEngagement:
     | "passive"
     | "following"
@@ -31,7 +35,8 @@ export type CoachAnalysis = {
     | "challenge"
     | "rescue"
     | "address_question"
-    | "return_to_mainline";
+    | "return_to_mainline"
+    | "slow_down_for_persona";
   actionReason: string;
   responsePlaybook: {
     ifShortAck: string;
@@ -56,13 +61,15 @@ export type LearnerCoachAnalysis = {
   personaNote: string;
   affect: "engaged" | "anxious" | "frustrated" | "disengaged" | "performing";
   recommendedAction:
+    | "ack_and_move_on"
     | "ask_why"
     | "ask_boundary"
     | "ask_analogy"
     | "restate_and_flag_uncertainty"
     | "admit_confusion"
     | "slow_down"
-    | "drop_pretraining_hint";
+    | "drop_pretraining_hint"
+    | "keep_short";
   actionReason: string;
   responsePlaybook: {
     ifTeacherAdvances: string;
@@ -75,21 +82,11 @@ export type LearnerCoachAnalysis = {
 
 const RECENT_TURNS_FOR_COACH = 10;
 
-/**
- * 剥掉 LLM 输出里可能的 markdown 代码围栏与 <think> 块，返回纯 JSON 字符串。
- */
-function stripFences(raw: string): string {
-  let s = raw.trim();
-  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-  // 代码围栏
-  const fenceMatch = s.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);
-  if (fenceMatch) return fenceMatch[1].trim();
-  // 一些模型会在 JSON 前后加解释——取第一个 { 到最后一个 } 之间
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first !== -1 && last > first) return s.slice(first, last + 1);
-  return s;
-}
+const LEARNER_LABEL: Record<string, string> = {
+  novice: "novice（新手：几乎没有预备知识，默认反应是『嗯我理解了』，不主动复述、不问边界）",
+  mid: "mid（中级：有基础，会复述与追问）",
+  critic: "critic（挑刺型：主动找边界与反例）",
+};
 
 /**
  * 后台教练分析。观察最近 turns，产出结构化 JSON。失败时返回 null，教师那一轮就不注入。
@@ -97,7 +94,9 @@ function stripFences(raw: string): string {
 export async function analyzeWithCoach(opts: {
   bookTitle: string;
   sectionTitle: string;
+  learnerId: string;
   pacing: "thorough" | "normal" | "express";
+  teachingMode?: TeachingMode;
   turns: Turn[];
   signal?: AbortSignal;
 }): Promise<CoachAnalysis | null> {
@@ -109,6 +108,7 @@ export async function analyzeWithCoach(opts: {
     .map((t) => (t.actor === "teacher" ? "【教师】\n" : "【学生】\n") + t.text)
     .join("\n\n---\n\n");
 
+  const mode = opts.teachingMode ?? "socratic";
   const messages: LLMMessage[] = [
     { role: "system", content: rules },
     {
@@ -118,19 +118,20 @@ export async function analyzeWithCoach(opts: {
         ``,
         `**书**：《${opts.bookTitle}》`,
         `**本节**：${opts.sectionTitle}`,
+        `**学生画像**：${LEARNER_LABEL[opts.learnerId] ?? opts.learnerId}`,
         `**教学节奏**：${opts.pacing}`,
+        `**教学模式**：${mode}`,
         ``,
         `# 最近对话`,
         ``,
         transcript,
         ``,
-        `按 coach_rules 的 JSON schema 输出，只输出 JSON。`,
+        `按 coach_rules 的 JSON schema 输出，只输出 JSON。判断教师推进节奏时**必须**结合上面标出的学生画像——novice 场景下推进过快就报 \`too_fast_for_persona\`。${mode === "close_reading" ? "**本会话为句读模式**：教师引原文外的话（注疏 / 类比 / 现代对应）或跨文本联想 → 报 `extending_beyond_text`（优先级最高）。" : ""}`,
       ].join("\n"),
     },
   ];
 
   try {
-    // OpenAI 兼容 response_format=json_object；非流式
     const raw = await callLLM("coach" as Purpose, messages, {
       stream: false,
       temperature: 0.2,
@@ -138,8 +139,8 @@ export async function analyzeWithCoach(opts: {
       jsonMode: true,
       signal: opts.signal,
     });
-    const cleaned = stripFences(raw);
-    const parsed = JSON.parse(cleaned) as CoachAnalysis;
+    const parsed = parseLenientJson<CoachAnalysis>(raw);
+    if (!parsed) return null;
     // 基本合法性校验：几个 enum 字段
     if (!parsed.companionBehavior || !parsed.recommendedAction) return null;
     if (!parsed.responsePlaybook) return null;
@@ -193,17 +194,12 @@ export function renderCoachBlock(a: CoachAnalysis): string {
 // 学生教练
 // ============================================================================
 
-const LEARNER_LABEL: Record<string, string> = {
-  novice: "novice（新手：几乎没有预备知识）",
-  mid: "mid（中级：有基础，会复述与追问）",
-  critic: "critic（挑刺型：主动找边界与反例）",
-};
-
 export async function analyzeLearnerWithCoach(opts: {
   bookTitle: string;
   sectionTitle: string;
   learnerId: string;
   pacing: "thorough" | "normal" | "express";
+  teachingMode?: TeachingMode;
   turns: Turn[];
   signal?: AbortSignal;
 }): Promise<LearnerCoachAnalysis | null> {
@@ -215,6 +211,7 @@ export async function analyzeLearnerWithCoach(opts: {
     .map((t) => (t.actor === "teacher" ? "【教师】\n" : "【学生】\n") + t.text)
     .join("\n\n---\n\n");
 
+  const mode = opts.teachingMode ?? "socratic";
   const messages: LLMMessage[] = [
     { role: "system", content: rules },
     {
@@ -226,12 +223,13 @@ export async function analyzeLearnerWithCoach(opts: {
         `**本节**：${opts.sectionTitle}`,
         `**学生画像**：${LEARNER_LABEL[opts.learnerId] ?? opts.learnerId}`,
         `**教学节奏**：${opts.pacing}`,
+        `**教学模式**：${mode}`,
         ``,
         `# 最近对话`,
         ``,
         transcript,
         ``,
-        `按 learner_coach_rules 的 JSON schema 输出，只输出 JSON。`,
+        `按 learner_coach_rules 的 JSON schema 输出，只输出 JSON。${mode === "close_reading" ? "**本会话为句读模式**：学生把原文说成现代话 → qualityFlags 加 `modernization_pressure`；学生带外部文本联想（\"这跟 XX 里一样吗\"）→ qualityFlags 加 `cross_text_pressure`。" : ""}`,
       ].join("\n"),
     },
   ];
@@ -244,8 +242,8 @@ export async function analyzeLearnerWithCoach(opts: {
       jsonMode: true,
       signal: opts.signal,
     });
-    const cleaned = stripFences(raw);
-    const parsed = JSON.parse(cleaned) as LearnerCoachAnalysis;
+    const parsed = parseLenientJson<LearnerCoachAnalysis>(raw);
+    if (!parsed) return null;
     if (!parsed.understandingLevel || !parsed.recommendedAction) return null;
     if (!parsed.responsePlaybook) return null;
     if (!Array.isArray(parsed.qualityFlags)) parsed.qualityFlags = [];
@@ -285,10 +283,12 @@ export function renderLearnerCoachBlock(a: LearnerCoachAnalysis): string {
     `### 教练推荐你下一步：\`${a.recommendedAction}\``,
     `**理由**：${a.actionReason}`,
     ``,
-    `### 分情况 playbook（老师这轮做什么，你就走哪一支）`,
+    `### 分情况参考（**只是备胎——你想不到怎么说时，可以从下面挑一支来做**；如果你自己已经有想说的，别翻这段）`,
     `- 老师推进到新点：${a.responsePlaybook.ifTeacherAdvances}`,
     `- 老师抛问题让你答：${a.responsePlaybook.ifTeacherQuestions}`,
     `- 老师在重复之前的点：${a.responsePlaybook.ifTeacherRepeats}`,
     `- 你觉得老师讲错或跳步了：${a.responsePlaybook.ifTeacherWrong}`,
+    ``,
+    `**注意**：这份 playbook 是给你**兜底**的，不是硬性剧本。不要 4 条挨着回；也不要每轮都精准套一条——真的学生反应比这乱、比这散、比这不齐整。`,
   ].join("\n");
 }

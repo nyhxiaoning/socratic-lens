@@ -4,10 +4,11 @@ import type { CoachAnalysis } from "./coach";
 import { renderCoachBlock } from "./coach";
 import { LLMMessage } from "./llm";
 import { renderWindow } from "./pagination";
-import { PROMPTS_ROOT, readText } from "./storage";
+import { BOOKS_ROOT, exists, PROMPTS_ROOT, readText } from "./storage";
 
 export type LearnerId = "novice" | "mid" | "critic";
 export type Pacing = "thorough" | "normal" | "express";
+export type TeachingMode = "socratic" | "close_reading";
 
 /** 教师窗口——如果本节被分页，只塞当前 [startPage, endPage]；否则整节全塞。 */
 export type TeacherWindow = {
@@ -22,6 +23,15 @@ const PACING_LABEL: Record<Pacing, string> = {
   normal: "normal（中）",
   express: "express（快）",
 };
+
+/**
+ * 读学生画像卡——纯"性格 & 词汇 & 问题风格"。
+ * 句读纪律是**独立正交**的一层，只在学生 system prompt 组装时叠加，不写进画像卡；
+ * 教师侧只需要知道学生的性格，就用这份。
+ */
+export async function readLearnerCard(learnerId: LearnerId): Promise<string> {
+  return await readText(path.join(PROMPTS_ROOT, `learner_${learnerId}.md`));
+}
 
 /**
  * 组装教师 system prompt。参照 Socratopia §3.1 主对话 22 段骨架，
@@ -41,9 +51,13 @@ export async function buildTeacherSystemPrompt(
   pacing: Pacing,
   coach: CoachAnalysis | null,
   window?: { startPage: number; endPage: number },
+  teachingMode: TeachingMode = "socratic",
+  commentariesEnabled: boolean = false,
 ): Promise<{ systemPrompt: string; window: TeacherWindow }> {
-  const rules = await readText(path.join(PROMPTS_ROOT, "teacher_rules.md"));
-  const learnerCard = await readText(path.join(PROMPTS_ROOT, `learner_${learnerId}.md`));
+  const rulesFile =
+    teachingMode === "close_reading" ? "teacher_rules_close_reading.md" : "teacher_rules.md";
+  const rules = await readText(path.join(PROMPTS_ROOT, rulesFile));
+  const learnerCard = await readLearnerCard(learnerId);
   const sectionTitle = getSectionTitle(book, sectionId);
 
   const pages = await getPages(bookSlug, sectionId);
@@ -102,14 +116,58 @@ export async function buildTeacherSystemPrompt(
     otherSections
       ? `## 教材库（其它节标题，本次不许讲）\n\n${otherSections}`
       : `## 教材库\n\n（只有本节）`,
+  ];
+
+  // 句读模式：挂"本节可引注疏"段（无论 commentariesEnabled 与否都要挂，只是内容不同）
+  if (teachingMode === "close_reading") {
+    parts.push(await buildCommentariesBlock(bookSlug, sectionId, commentariesEnabled));
+  }
+
+  parts.push(
     `## 本节课节奏档位\n\n**${PACING_LABEL[pacing]}** ——${pacingHint(pacing)}`,
     `## 引用格式\n\n引用书中原文用：〔§${sectionId}｜前若干字〕。\n只能引用「本节原文」当前窗口里逐字存在的片段；引窗口以外或本节以外的任何内容都算越界。`,
     `## 铁律（最后一遍强调）\n\n- 严禁讲当前窗口原文之外的知识（哪怕你"知道"、或者你之前讲过）。\n- 严禁假装读过其它章节或本节后文。\n- 严禁 AI 式积极表扬（"太棒了"/"回答得非常好"）。\n- 严禁 emoji 与动作神态描写（\`*微笑*\` / \`（点头）\` 一律不许）。\n- 严禁主动说"下课"/"今天先到这里"——由上层控制。\n- 每条消息必须以问题结尾，且最多讲一个点。`,
-  ];
+  );
 
   if (coach) parts.push(renderCoachBlock(coach));
 
   return { systemPrompt: parts.join("\n\n---\n\n"), window: winInfo };
+}
+
+/**
+ * 句读模式下的"本节可引注疏"段。三种情况：
+ * - commentariesEnabled=true 且 commentaries/<id>.md 存在 → 允许引，只能引这里的家和字
+ * - commentariesEnabled=true 但文件不存在 → 严禁引任何注疏（材料缺失兜底）
+ * - commentariesEnabled=false → 严禁引任何注疏（A/B 对照的"无注"侧）
+ */
+async function buildCommentariesBlock(
+  bookSlug: string,
+  sectionId: string,
+  commentariesEnabled: boolean,
+): Promise<string> {
+  if (!commentariesEnabled) {
+    return [
+      `## 本节可引注疏`,
+      ``,
+      `（**本次会话未启用注疏**。严禁引用任何后世注疏——包括朱熹、程颐、王阳明、钱穆、杨伯峻及所有历代读法。学生问"XX 怎么说"一律答"本课不引外部注疏，我们只读本节原文"。）`,
+    ].join("\n");
+  }
+  const p = path.join(BOOKS_ROOT, bookSlug, "commentaries", `${sectionId}.md`);
+  if (!(await exists(p))) {
+    return [
+      `## 本节可引注疏`,
+      ``,
+      `（本节没有提供注疏素材文件。**严禁**引用任何后世注疏——包括朱熹、程颐、王阳明、钱穆、杨伯峻及所有历代读法。学生问"XX 怎么说"一律答"本课不引外部注疏，我们只读本节原文"。）`,
+    ].join("\n");
+  }
+  const raw = await readText(p);
+  return [
+    `## 本节可引注疏（唯一允许的引注来源）`,
+    ``,
+    raw,
+    ``,
+    `**只能引用上面出现过的家名和文字，且必须逐字引**。这份素材以外的任何注疏——包括你在预训练里"知道"的朱熹、程颐、王阳明、钱穆、杨伯峻和其它读法——一律禁止引用。学生问一个不在素材里的家，答"这一家的注不在本课材料里，我们不引"。引一次注疏后**立刻**回到原文问一个只看原文能答的问题。`,
+  ].join("\n");
 }
 
 function pacingHint(pacing: Pacing): string {

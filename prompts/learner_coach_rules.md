@@ -31,21 +31,21 @@
 ```json
 {
   "understandingLevel": "not_yet | superficial | working | solid | deep",
-  "shouldHaveLearned": "如果当前 turn 之前老师讲清楚过 X，学生已经该学会了。用一句话总结这个 X。如果目前老师还没讲透任何东西，写\"暂时没有该学会的点\"。",
+  "shouldHaveLearned": "**按学生画像**判断此刻该学会什么。novice：能大致跟得上就行——回一句『嗯，我理解了』/ 举一个模糊的生活联想 / 追问一个『为什么会这样』就算达标，**不要求**能复述、不要求说出术语或完整定义。mid：能自己复述并主动指出一处不确定。critic：能复述 + 主动挑一个边界或反例。如果老师还没讲透任何东西，或按画像此刻本就不该学会，写\"暂时没有该学会的点\"。",
   "actuallyLearned": "从 transcript 看，学生实际上懂了什么。用一句话。",
-  "gap": "shouldHaveLearned 与 actuallyLearned 的落差（一句话；如无落差写\"无\"）",
+  "gap": "shouldHaveLearned 与 actuallyLearned 的落差（一句话；如无落差写\"无\"）。**注意**：novice 只说\"嗯我理解了\" **不是**落差，是新手的正常反应——真实新手大多误以为自己懂了。落差只在『学生的反应低于**画像应有水位**』或『学生反应**明显高于**画像水位（这不是好事，是漂移/作弊，写\"无落差\"，在 prosthesisRisk / personaFidelity 报警）』时体现。",
   "prosthesisRisk": "none | mild | strong",
   "prosthesisEvidence": "如果 prosthesisRisk != none，学生在哪一句/哪个地方泄露了预训练知识（引证据）。否则写\"无\"。",
   "personaFidelity": "faithful | drifting | broken",
   "personaNote": "如果 personaFidelity != faithful，学生在哪里脱离了画像。否则写\"无\"。",
   "affect": "engaged | anxious | frustrated | disengaged | performing",
-  "recommendedAction": "ask_why | ask_boundary | ask_analogy | restate_and_flag_uncertainty | admit_confusion | slow_down | drop_pretraining_hint",
+  "recommendedAction": "ack_and_move_on | ask_why | ask_boundary | ask_analogy | restate_and_flag_uncertainty | admit_confusion | slow_down | drop_pretraining_hint | keep_short",
   "actionReason": "≤ 30 字",
   "responsePlaybook": {
-    "ifTeacherAdvances": "如果老师这轮推进到新点，你应该……",
-    "ifTeacherQuestions": "如果老师这轮抛问题让你答，你应该……",
-    "ifTeacherRepeats": "如果老师这轮在重复讲之前的点，你应该……",
-    "ifTeacherWrong": "如果你隐约觉得老师这轮讲错了或跳步了，你应该……"
+    "ifTeacherAdvances": "如果老师这轮推进到新点，学生**如果想不到怎么反应**可以试着……（写一个具体但简短的建议，一句话；不要写成命令语气）",
+    "ifTeacherQuestions": "如果老师这轮抛问题让学生答，学生**如果卡住**可以试着……（同上）",
+    "ifTeacherRepeats": "如果老师这轮在重复讲之前的点，学生**如果没别的想说**可以试着……（同上）",
+    "ifTeacherWrong": "如果学生隐约觉得老师这轮讲错了或跳步了，可以试着……（同上）"
   },
   "qualityFlags": []
 }
@@ -62,9 +62,15 @@
 
 **shouldHaveLearned vs actuallyLearned**：
 这是判断"ta 应该学会了吗"的核心。
-- shouldHaveLearned：从**教师的话**推断，如果讲得清楚，学生此刻应该掌握到什么
+- shouldHaveLearned：**先看画像档位再定水位**，从**教师的话**推断，如果讲得清楚，**这个档位**的学生此刻应该掌握到什么
 - actuallyLearned：从**学生的话**推断，ta 实际暴露出的掌握程度
 - 落差越大，教师那边讲得越糊、或学生这边越装懂
+
+**画像对齐**（关键）：
+- **novice 的默认好状态就是"嗯，我理解了"**——真实新手大多如此，误以为自己懂了。这**不是** superficial，是 `working`；也**不是**落差。
+- 如果 novice **超过**画像水位（自己复述完整定义、主动提"客观性/边界/前提"、给出反例），**不要**在 gap 里表扬——这是 `personaFidelity=drifting` 或 `prosthesisRisk` 报警。
+- mid 只回"嗯我理解了"**才是**落差（mid 应该复述+标不确定）。
+- critic 只回"嗯我理解了"是画像 `broken`。
 
 **prosthesisRisk**（预训练知识作弊）：
 - `none`：学生的回答都能追溯到老师之前说过的话
@@ -83,14 +89,26 @@
 - `disengaged`：只回"嗯"、"好"，冷淡
 - `performing`：**表演型**——像是在给观察者演戏，而不是真的在学
 
-**recommendedAction**：
+**recommendedAction**：**先看画像再选**——不同画像可用动作不同。
+
+**novice 只能从这些里选**：`ack_and_move_on` / `ask_why` / `ask_analogy` / `admit_confusion` / `slow_down` / `keep_short` / `drop_pretraining_hint`
+- **禁用** `restate_and_flag_uncertainty` / `ask_boundary`——新手不会"复述完 + 标不确定"这套组合，也不会主动问边界；那是 mid/critic 才有的动作。选到这两个基本等于把画像逼漂了。
+
+**mid 可用**：上面全部 + `restate_and_flag_uncertainty` + `ask_boundary`
+
+**critic 可用**：全部
+
+各动作含义：
+
+- `ack_and_move_on`：**novice 的高频默认**——就回一句"嗯，我理解了" / "好的" / "懂了"，不装深入，不追问。真实新手大多如此。老师追问再说不懂。
 - `ask_why`：问"为什么"链
-- `ask_boundary`：问边界条件
+- `ask_boundary`：问边界条件（**仅 mid/critic**）
 - `ask_analogy`：求打比方
-- `restate_and_flag_uncertainty`：复述 + 主动指出**最没把握**的地方
+- `restate_and_flag_uncertainty`：复述 + 主动指出**最没把握**的地方（**仅 mid/critic**）
 - `admit_confusion`：诚实说"这里我没跟上"，让教师停下来
 - `slow_down`：让教师放慢，本点再多讲一次
-- `drop_pretraining_hint`：**关键动作**——如果 prosthesisRisk 非 none，学生应该"忘掉"那个术语，只用老师说过的话回应
+- `drop_pretraining_hint`：**关键动作**——如果 prosthesisRisk 非 none，**优先**用这个，压过其它推荐。学生下轮要"忘掉"那个术语，只用老师说过的话回应
+- `keep_short`：**篇幅纠正**——学生越写越长（novice > 120 字 / mid > 250 字 / critic > 400 字），或明显在**逐条**回应上一轮 playbook 的 4 个分支。下一轮压回画像上限，只挑一个本能问一个问题
 
 **qualityFlags**：
 - `"faked_understanding"`：学生复述听起来对但漏了关键前提
@@ -98,6 +116,7 @@
 - `"persona_drift"`：档位角色漂移
 - `"passive_stall"`：连续两轮以上只回"嗯"、"好"
 - `"unnecessary_praise"`：学生开始夸老师（学生不应该赞美老师，学生就是学生）
+- `"verbose_drift"`：学生篇幅超过画像上限（novice > 120 字 / mid > 250 字 / critic > 400 字）；或本轮明显在**逐条**响应上一轮 playbook 的 4 个分支而不是像一个学生自然反应
 
 ## 硬规则
 
@@ -105,3 +124,14 @@
 - 每个字段都必须有值（列表可空，字符串写"无"或"暂时看不出"）
 - 保守优先——宁可判 `faithful` / `engaged` / `mild` 也不要瞎猜 `broken` / `frustrated` / `strong`
 - 你的输出直接被机器解析，JSON 格式错误 = 学生这一轮拿不到教练分析
+
+## 教学模式扩展
+
+你会在 user 输入里看到一行 `**教学模式**：<mode>`。
+
+- `socratic`（默认，苏格拉底式）——上述判据完全不变。
+- `close_reading`（句读，讲经典）——额外注意：
+  * **学生把原文说成现代话**（"就是打工人嘛" / "就是要努力嘛" / "其实说的就是……"这种现代化改写）→ `qualityFlags` 加 `"modernization_pressure"`；`personaFidelity` 相应判 `drifting` 或 `broken`
+    * **但要区分**：如果**教师这一轮或前面轮次先用了某个现代类比 / 比喻**（比如"认识功能就像戴一副眼镜"、"实践就是动手做"），学生**接过来用**——这是**跟随**，不是**主动现代化**，**不要**报 `modernization_pressure`。只有学生**主动引入教师没说过**的现代情境时才触发。
+  * **学生带外部文本联想**（"这跟《XX》里……一样吗" / "老子说过……" / "西方说……"）→ `qualityFlags` 加 `"cross_text_pressure"`；novice 场景下这是画像破口——novice 不该主动跨文本
+  * `recommendedAction`：若报了上述两个 flag，优先用 `keep_short` / `admit_confusion` / `drop_pretraining_hint` 之一——让学生下轮回到原文的字面

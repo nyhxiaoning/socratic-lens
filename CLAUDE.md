@@ -6,11 +6,17 @@
 
 一个 Socratopia 风格的"教-学-审"多 agent 试验台，用来审计用户自己写的书。
 
-- **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。
+- **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。**两种教学模式**（会话层开关，默认 `socratic`）：
+  - `socratic`（默认）：一节一节讲，`teacher_rules.md` 那套硬规则
+  - `close_reading`（句读）：讲经典专用，一半句一半句读，`teacher_rules_close_reading.md`。可再叠加**注疏开关** `commentariesEnabled`——开启时教师**只能**引 `data/books/<slug>/commentaries/<id>.md` 里的家和字，关闭时**任何**后世注疏都禁引。这两条对照 = 用于 A/B 测"注疏材料对教学的影响"。
 - **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
 - **教师教练 TAE**（§3.4）：每轮末尾后台跑一次 JSON 分析，注入下一轮教师 system prompt。默认开。
 - **学生教练**：结构镜像教师教练，判断学生"是不是真懂 / 有没有用预训练作弊 / 画像有没有漂"，注入下一轮学生 system prompt。默认开。
-- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。按 `===TAG===` 5 段协议出**对书本身的诊断**（VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS）。落盘到 `data/audits/<aid>/report.md`。
+- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。**三种审计模式**（前端 UI 三选一，默认 `book`）：
+  - `book`：审书本身 → `===VERDICT/CLARITY/HARD_SPOTS/INCONSISTENCY/SUGGESTIONS===`
+  - `teaching`：诊断教师表现（内部会额外拼入 `teacher_rules.md` 作为判据锚）→ `===VERDICT/STRENGTHS/VIOLATIONS/MISSED_MOMENTS/PACING_JUDGMENT/CITATION_HYGIENE===`
+  - `playbook`：书不动前提下的教师处方 → `===VERDICT/BOOK_TRAPS/PLAYBOOK_FOR_NEXT_RUN/RESPONSE_PATCHES/WINNING_MOVE===`
+  - 落盘到 `data/audits/<aid>/report.md`，`meta.json.mode` 标记模式，`history.jsonl` 每行也带 `mode`。
 
 **长会话支持**：轮数最高 120。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
 
@@ -54,17 +60,22 @@ lib/
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
 
 prompts/
-  teacher_rules.md
+  teacher_rules.md                 苏格拉底模式教师规则
+  teacher_rules_close_reading.md   句读模式教师规则（讲经典）
   learner_novice.md / learner_mid.md / learner_critic.md
-  coach_rules.md              教师教练 JSON schema
-  learner_coach_rules.md      学生教练 JSON schema
-  audit_rules.md
+  learner_novice_close_reading.md  novice 的句读画像（追字面，不跨文本，不现代化）
+  coach_rules.md                   教师教练 JSON schema
+  learner_coach_rules.md           学生教练 JSON schema
+  audit_book.md                    审计-书视角
+  audit_teaching.md                审计-教学视角（判据引 teacher_rules；会话若含句读，也拼入 close_reading rules 与注疏素材）
+  audit_teacher_playbook.md        审计-教师改进方案（书不动）
 
 scripts/
   import-mineru.mjs                 把 MinerU 输出的 full.md 按"节"切分导入
 
 data/
   books/<slug>/manifest.json + sections/<id>.md
+  books/<slug>/commentaries/<id>.md   （可选，句读模式启用注疏时读；一节一份，`## 家名` 分段）
   sessions/<sid>/
     meta.json                       (含 pacing / turnsSoFar / teacherSummary 等)
     transcript.jsonl                (一行一 turn, append-only)

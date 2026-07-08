@@ -27,6 +27,7 @@ import {
   TEACHER_OPENING_TRIGGER,
   type LearnerId,
   type Pacing,
+  type TeachingMode,
 } from "./teacher";
 
 export type Actor = "teacher" | "learner";
@@ -54,6 +55,10 @@ export type SessionMeta = {
   /** 自适应翻页：教师当前看到的窗口页码（仅本节被分页时用）。 */
   windowStartPage?: number;
   windowEndPage?: number;
+  /** 教学模式：socratic（默认）/ close_reading（句读，讲经典）。老 meta 缺该字段兜底 socratic。 */
+  teachingMode?: TeachingMode;
+  /** 仅 close_reading 下有意义——是否允许教师引用 commentaries 素材。 */
+  commentariesEnabled?: boolean;
 };
 
 export type SessionEvent =
@@ -299,6 +304,8 @@ export type StartSessionInput = {
   coachEnabled: boolean;
   learnerCoachEnabled: boolean;
   maxTurns: number;
+  teachingMode?: TeachingMode;
+  commentariesEnabled?: boolean;
   signal: AbortSignal;
   /** 若提供，恢复该 sid 继续跑；否则新建 sid。 */
   resumeSid?: string;
@@ -331,6 +338,10 @@ export async function* runSession(
     meta.pacing = input.pacing;
     meta.coachEnabled = input.coachEnabled;
     meta.learnerCoachEnabled = input.learnerCoachEnabled;
+    // teachingMode / commentariesEnabled 在会话中不允许改动（改了会破坏 A/B 对照的可比性）——
+    // 兜底老 meta 缺字段的情况
+    if (!meta.teachingMode) meta.teachingMode = "socratic";
+    if (meta.commentariesEnabled === undefined) meta.commentariesEnabled = false;
     turns = await loadExistingTurns(input.resumeSid);
     meta.turnsSoFar = turns.filter((t) => t.actor === "learner").length; // 教师+学生都完成的 turn 数
     await writeMeta(meta);
@@ -358,6 +369,7 @@ export async function* runSession(
     }
   } else {
     const sid = newSid();
+    const teachingMode: TeachingMode = input.teachingMode ?? "socratic";
     meta = {
       sid,
       bookSlug: input.bookSlug,
@@ -370,6 +382,10 @@ export async function* runSession(
       turnsSoFar: 0,
       startedAt: Date.now(),
       status: "running",
+      teachingMode,
+      // socratic 模式下 commentaries 强制 false
+      commentariesEnabled:
+        teachingMode === "close_reading" ? !!input.commentariesEnabled : false,
     };
     turns = [];
     await ensureDir(sessionDir(sid));
@@ -425,6 +441,8 @@ export async function* runSession(
           meta.windowStartPage !== undefined && meta.windowEndPage !== undefined
             ? { startPage: meta.windowStartPage, endPage: meta.windowEndPage }
             : undefined,
+          meta.teachingMode ?? "socratic",
+          !!meta.commentariesEnabled,
         );
       // 若首轮 & 本节被分页 & meta 里还没有窗口，把 buildTeacherSystemPrompt 决定的初始窗口回写
       if (
@@ -446,15 +464,27 @@ export async function* runSession(
         teacherWindow.visibleTurns,
         TEACHER_OPENING_TRIGGER,
       );
+      // 空 turn 保护：模型偶尔返回全空文本（如把内容写进 reasoning_content，或被截断）。
+      // 空 turn 会污染下一 agent——它对着一条空 user 消息幻觉出根本没说过的内容。
+      // 所以：跑完发现空就重试一次；再空就报错终止会话，绝不把空 turn 落盘。
       let teacherText = "";
-      for await (const chunk of callLLM("teacher", teacherMsgs, {
-        stream: true,
-        temperature: 0.7,
-        maxTokens: 800,
-        signal: input.signal,
-      })) {
-        teacherText += chunk;
-        yield { type: "chunk", actor: "teacher", turn: turnIdx, text: chunk };
+      for (let attempt = 0; attempt < 2 && teacherText.trim() === ""; attempt++) {
+        teacherText = "";
+        for await (const chunk of callLLM("teacher", teacherMsgs, {
+          stream: true,
+          temperature: 0.7,
+          maxTokens: 800,
+          signal: input.signal,
+        })) {
+          teacherText += chunk;
+          yield { type: "chunk", actor: "teacher", turn: turnIdx, text: chunk };
+        }
+        if (input.signal.aborted) break;
+      }
+      if (teacherText.trim() === "") {
+        throw new Error(
+          `教师在第 ${turnIdx} 轮连续两次返回空内容——已终止会话，避免空消息污染学生。可能是模型把输出写进了 reasoning 字段或被截断，检查 LLM_MODEL 配置。`,
+        );
       }
       const teacherTurn: Turn = {
         turn: turnIdx,
@@ -481,6 +511,7 @@ export async function* runSession(
         meta.sectionId,
         meta.learnerId,
         learnerCoachAnalysis,
+        meta.teachingMode ?? "socratic",
       );
       if (learnerWindow.addendum) {
         learnerSystem = learnerSystem + "\n\n---\n\n" + learnerWindow.addendum;
@@ -488,15 +519,25 @@ export async function* runSession(
 
       yield { type: "turn_start", actor: "learner", turn: turnIdx };
       const learnerMsgs = buildLearnerMessages(learnerSystem, learnerWindow.visibleTurns);
+      // 同教师侧：空 turn 保护
       let learnerText = "";
-      for await (const chunk of callLLM("learner", learnerMsgs, {
-        stream: true,
-        temperature: 0.8,
-        maxTokens: 500,
-        signal: input.signal,
-      })) {
-        learnerText += chunk;
-        yield { type: "chunk", actor: "learner", turn: turnIdx, text: chunk };
+      for (let attempt = 0; attempt < 2 && learnerText.trim() === ""; attempt++) {
+        learnerText = "";
+        for await (const chunk of callLLM("learner", learnerMsgs, {
+          stream: true,
+          temperature: 0.8,
+          maxTokens: 500,
+          signal: input.signal,
+        })) {
+          learnerText += chunk;
+          yield { type: "chunk", actor: "learner", turn: turnIdx, text: chunk };
+        }
+        if (input.signal.aborted) break;
+      }
+      if (learnerText.trim() === "") {
+        throw new Error(
+          `学生在第 ${turnIdx} 轮连续两次返回空内容——已终止会话。可能是模型把输出写进了 reasoning 字段或被截断，检查 LLM_MODEL 配置。`,
+        );
       }
       const learnerTurn: Turn = {
         turn: turnIdx,
@@ -524,7 +565,9 @@ export async function* runSession(
               const a = await analyzeWithCoach({
                 bookTitle: book.title,
                 sectionTitle,
+                learnerId: meta.learnerId,
                 pacing: meta.pacing,
+                teachingMode: meta.teachingMode ?? "socratic",
                 turns,
                 signal: input.signal,
               });
@@ -544,6 +587,7 @@ export async function* runSession(
                 sectionTitle,
                 learnerId: meta.learnerId,
                 pacing: meta.pacing,
+                teachingMode: meta.teachingMode ?? "socratic",
                 turns,
                 signal: input.signal,
               });
