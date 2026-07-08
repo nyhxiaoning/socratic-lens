@@ -14,6 +14,8 @@ data/audits/
 data/books/*
 !data/books/example
 !data/books/makesi
+!data/books/kant
+!data/books/lunyu
 
 # 分页缓存可再生，忽略
 data/books/**/*.pages.json
