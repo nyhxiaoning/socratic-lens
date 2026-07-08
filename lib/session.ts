@@ -3,6 +3,8 @@ import { getBook, getPages, getSectionTitle } from "./book";
 import {
   analyzeLearnerWithCoach,
   analyzeWithCoach,
+  renderCoachBlock,
+  renderLearnerCoachBlock,
   type CoachAnalysis,
   type LearnerCoachAnalysis,
 } from "./coach";
@@ -25,6 +27,7 @@ import {
   buildTeacherMessages,
   buildTeacherSystemPrompt,
   TEACHER_OPENING_TRIGGER,
+  TEACHER_OPENING_TRIGGER_CLOSE_READING,
   type LearnerId,
   type Pacing,
   type TeachingMode,
@@ -462,7 +465,10 @@ export async function* runSession(
       const teacherMsgs = buildTeacherMessages(
         teacherSystem,
         teacherWindow.visibleTurns,
-        TEACHER_OPENING_TRIGGER,
+        (meta.teachingMode ?? "socratic") === "close_reading"
+          ? TEACHER_OPENING_TRIGGER_CLOSE_READING
+          : TEACHER_OPENING_TRIGGER,
+        coachAnalysis ? renderCoachBlock(coachAnalysis) : null,
       );
       // 空 turn 保护：模型偶尔返回全空文本（如把内容写进 reasoning_content，或被截断）。
       // 空 turn 会污染下一 agent——它对着一条空 user 消息幻觉出根本没说过的内容。
@@ -518,7 +524,11 @@ export async function* runSession(
       }
 
       yield { type: "turn_start", actor: "learner", turn: turnIdx };
-      const learnerMsgs = buildLearnerMessages(learnerSystem, learnerWindow.visibleTurns);
+      const learnerMsgs = buildLearnerMessages(
+        learnerSystem,
+        learnerWindow.visibleTurns,
+        learnerCoachAnalysis ? renderLearnerCoachBlock(learnerCoachAnalysis) : null,
+      );
       // 同教师侧：空 turn 保护
       let learnerText = "";
       for (let attempt = 0; attempt < 2 && learnerText.trim() === ""; attempt++) {

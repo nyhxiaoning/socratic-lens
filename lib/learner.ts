@@ -1,7 +1,6 @@
 import path from "node:path";
 import { BookManifest, getSectionTitle } from "./book";
 import type { LearnerCoachAnalysis } from "./coach";
-import { renderLearnerCoachBlock } from "./coach";
 import { LLMMessage } from "./llm";
 import { PROMPTS_ROOT, readText } from "./storage";
 import { readLearnerCard, type LearnerId, type TeachingMode } from "./teacher";
@@ -29,15 +28,19 @@ export async function buildLearnerSystemPrompt(
     parts.push(discipline);
   }
 
-  if (coach) parts.push(renderLearnerCoachBlock(coach));
+  // 教练块**不再拼进 system**（每轮都变会破坏 DeepSeek 缓存前缀）。改由 buildLearnerMessages
+  // 追加到 messages 尾部。coach 参数保留仅为兼容签名。
+  void coach;
 
   return parts.join("\n\n---\n\n");
 }
 
-/** 学生看到的对话：教师说的话是 user，自己说的话是 assistant。 */
+/** 学生看到的对话：教师说的话是 user，自己说的话是 assistant。
+ * coachBlock（若有）作为**最后一条 user 消息**追加，理由同教师侧（缓存命中）。 */
 export function buildLearnerMessages(
   systemPrompt: string,
   turns: { actor: "teacher" | "learner"; text: string }[],
+  coachBlock?: string | null,
 ): LLMMessage[] {
   const msgs: LLMMessage[] = [{ role: "system", content: systemPrompt }];
   for (const t of turns) {
@@ -45,6 +48,9 @@ export function buildLearnerMessages(
       role: t.actor === "teacher" ? "user" : "assistant",
       content: t.text,
     });
+  }
+  if (coachBlock && coachBlock.trim()) {
+    msgs.push({ role: "user", content: coachBlock });
   }
   return msgs;
 }

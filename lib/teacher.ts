@@ -1,12 +1,11 @@
 import path from "node:path";
 import { BookManifest, getPages, getSection, getSectionTitle } from "./book";
 import type { CoachAnalysis } from "./coach";
-import { renderCoachBlock } from "./coach";
 import { LLMMessage } from "./llm";
 import { renderWindow } from "./pagination";
 import { BOOKS_ROOT, exists, PROMPTS_ROOT, readText } from "./storage";
 
-export type LearnerId = "novice" | "mid" | "critic";
+export type LearnerId = "novice" | "mid" | "critic" | "cocky";
 export type Pacing = "thorough" | "normal" | "express";
 export type TeachingMode = "socratic" | "close_reading";
 
@@ -129,7 +128,11 @@ export async function buildTeacherSystemPrompt(
     `## 铁律（最后一遍强调）\n\n- 严禁讲当前窗口原文之外的知识（哪怕你"知道"、或者你之前讲过）。\n- 严禁假装读过其它章节或本节后文。\n- 严禁 AI 式积极表扬（"太棒了"/"回答得非常好"）。\n- 严禁 emoji 与动作神态描写（\`*微笑*\` / \`（点头）\` 一律不许）。\n- 严禁主动说"下课"/"今天先到这里"——由上层控制。\n- 每条消息必须以问题结尾，且最多讲一个点。`,
   );
 
-  if (coach) parts.push(renderCoachBlock(coach));
+  // 注意：教练块**不再拼进 system**。它每轮都变，若放在 system（整条 prompt 的最前缀）
+  // 会让 DeepSeek 硬盘缓存从第一个 token 起全 miss。改由 buildTeacherMessages 追加到 messages
+  // 尾部（对话历史之后的一条 user），使静态大头 + 对话历史逐字稳定、可命中缓存。
+  // coach 参数保留仅为兼容签名，此处不再使用。
+  void coach;
 
   return { systemPrompt: parts.join("\n\n---\n\n"), window: winInfo };
 }
@@ -182,24 +185,35 @@ function pacingHint(pacing: Pacing): string {
   }
 }
 
-/** 教师看到的对话：学生说的话是 user，自己说的话是 assistant。第一轮注入 opening trigger。 */
+/** 教师看到的对话：学生说的话是 user，自己说的话是 assistant。第一轮注入 opening trigger。
+ * coachBlock（若有）作为**最后一条 user 消息**追加——放在对话历史之后，让静态 system + 历史
+ * 逐字稳定、命中 DeepSeek 硬盘缓存；教练建议本就是"针对刚发生的这轮给下一步"，尾部注入语义也更自然。 */
 export function buildTeacherMessages(
   systemPrompt: string,
   turns: { actor: "teacher" | "learner"; text: string }[],
   openingTrigger: string,
+  coachBlock?: string | null,
 ): LLMMessage[] {
   const msgs: LLMMessage[] = [{ role: "system", content: systemPrompt }];
   if (turns.length === 0) {
     msgs.push({ role: "user", content: openingTrigger });
-    return msgs;
+  } else {
+    for (const t of turns) {
+      msgs.push({
+        role: t.actor === "learner" ? "user" : "assistant",
+        content: t.text,
+      });
+    }
   }
-  for (const t of turns) {
-    msgs.push({
-      role: t.actor === "learner" ? "user" : "assistant",
-      content: t.text,
-    });
+  if (coachBlock && coachBlock.trim()) {
+    msgs.push({ role: "user", content: coachBlock });
   }
   return msgs;
 }
 
 export const TEACHER_OPENING_TRIGGER = "请开始今天的第一课。用一两句话切入主题，再问我第一个问题。";
+
+// 句读模式专用开场：第一句必须先逐字亮出原文，再就这半句提问。
+// 不用这条，模型有时会开口就"根据这句话/这一段……"——可这是第一轮，指代的原文根本还没引出来。
+export const TEACHER_OPENING_TRIGGER_CLOSE_READING =
+  "开始今天的句读课。第一步：先用 〔§<节id>｜原文逐字片段〕 的格式，逐字亮出本节要读的第一句（或第一半句）原文——把它摆在明面上。第二步：只就这半句问我一个字面问题。禁止用「这句话/这一段/这里」这类指代开场，因为现在还没有任何上文，你必须先把原文引出来。";
