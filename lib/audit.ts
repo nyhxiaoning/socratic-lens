@@ -113,6 +113,7 @@ const LEARNER_LABEL: Record<string, string> = {
   novice: "新手（几乎没有预备知识，多问 why / 求打比方）",
   mid: "中级（有基础，会复述、会追问细节，容易半懂就以为懂）",
   critic: "挑刺型（受训的怀疑者，主动找边界与反例）",
+  cocky: "杠精型（半吊子，自以为懂、懒得读原文、爱抬杠，挑的刺多来自自己的误读）",
 };
 
 /** 每一节的审计素材：本节原文 + 覆盖该节的所有 session transcript。 */
@@ -196,7 +197,7 @@ async function collectMaterial(sids: string[]): Promise<{
   if (sections.length === 0) throw new Error("所选 session 都没有有效 transcript");
 
   // 从 metas 收集所有学生画像（去重、按 novice/mid/critic 的固定顺序排）
-  const learnerOrder: string[] = ["novice", "mid", "critic"];
+  const learnerOrder: string[] = ["novice", "mid", "critic", "cocky"];
   const learnerSet = new Set<string>(metas.map((m) => m.learnerId as string).filter(Boolean));
   const learnerIds = learnerOrder
     .filter((l) => learnerSet.has(l))

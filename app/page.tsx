@@ -14,11 +14,12 @@ type BookSummary = {
 type SectionMeta = { id: string; title: string };
 type BookDetail = { slug: string; title: string; author?: string; sections: SectionMeta[] };
 
-type LearnerId = "novice" | "mid" | "critic";
+type LearnerId = "novice" | "mid" | "critic" | "cocky";
 const LEARNERS: { id: LearnerId; label: string; desc: string }[] = [
   { id: "novice", label: "新手", desc: "没啥预备知识，多问为什么、求例子" },
   { id: "mid", label: "中级", desc: "有基础，会复述、会追问细节" },
   { id: "critic", label: "挑刺型", desc: "主动找边界与反例，容易质疑" },
+  { id: "cocky", label: "杠精型", desc: "自以为懂、懒得深究、爱抬杠找茬" },
 ];
 
 type Pacing = "thorough" | "normal" | "express";
