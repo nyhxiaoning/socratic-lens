@@ -5,6 +5,7 @@ import { Modal } from "@/components/Modal";
 import { ChatView } from "@/components/ChatView";
 import { CoachSidebar } from "@/components/CoachSidebar";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
+import { UploadBook } from "@/components/UploadBook";
 import { AuditPicker, AuditView } from "@/components/AuditPanel";
 import { Controls } from "@/components/Controls";
 import { useSession } from "@/components/useSession";
@@ -56,6 +57,15 @@ export default function Page() {
         onStart={() => s.start()}
         onStop={s.stop}
         onHistory={s.openHistory}
+        onUpload={() => s.setShowUpload(true)}
+        batchMode={s.batchMode}
+        onBatchMode={s.setBatchMode}
+        selectedLearners={s.selectedLearners}
+        onToggleLearner={s.toggleLearner}
+        selectedPacings={s.selectedPacings}
+        onTogglePacing={s.togglePacing}
+        batchRunning={s.batchRunning}
+        onRunBatch={s.runBatch}
       />
 
       {s.currentBookStat && (
@@ -71,6 +81,57 @@ export default function Page() {
           }}
         >
           {auditRecommendation(s.currentBookStat)}
+        </div>
+      )}
+
+      {s.batchRuns.length > 0 && (
+        <div
+          style={{
+            padding: "8px 12px",
+            marginBottom: 12,
+            fontSize: 12,
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+          }}
+        >
+          <div style={{ marginBottom: 6, color: "var(--muted)" }}>
+            批量矩阵 · {s.batchRuns.filter((r) => r.status === "done").length}/{s.batchRuns.length} 完成
+            {!s.batchRunning &&
+              s.batchRuns.some((r) => r.status === "done") &&
+              " —— 点右下角「审计…」对这批会话出统一报告"}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {s.batchRuns.map((r, i) => (
+              <span
+                key={i}
+                title={r.sid}
+                style={{
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  border: "1px solid var(--border)",
+                  color:
+                    r.status === "done"
+                      ? "var(--accent)"
+                      : r.status === "error"
+                        ? "var(--danger)"
+                        : r.status === "running"
+                          ? "inherit"
+                          : "var(--muted)",
+                  background: r.status === "running" ? "var(--teacher)" : "transparent",
+                }}
+              >
+                {r.learnerId}·{r.pacing}{" "}
+                {r.status === "done"
+                  ? "✓"
+                  : r.status === "running"
+                    ? "…"
+                    : r.status === "error"
+                      ? "✗"
+                      : "·"}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
@@ -158,6 +219,11 @@ export default function Page() {
         </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {s.sid && !s.running && !s.auditing && (
+            <button onClick={() => s.continueSession(6)} title="接着最后一个完整轮次，再跑 6 轮">
+              继续对话
+            </button>
+          )}
+          {s.sid && !s.running && !s.auditing && (
             <button className="primary" onClick={s.openAuditPanel}>
               审计…
             </button>
@@ -187,6 +253,10 @@ export default function Page() {
           sessions={s.existingSessions}
           picked={s.pickedSids}
           onTogglePick={s.togglePick}
+          dimension={s.auditDimension}
+          onDimension={s.setAuditDimension}
+          history={s.auditHistory}
+          onViewHistory={s.viewAudit}
           onCancel={() => s.setShowAuditPanel(false)}
           onSubmit={() => s.runAudit(Array.from(s.pickedSids))}
         />
@@ -214,7 +284,10 @@ export default function Page() {
               justifyContent: "space-between",
             }}
           >
-            <span>审计报告{s.auditing && "（生成中…）"}</span>
+            <span>
+              审计报告 · {s.auditDimension === "teacher" ? "教师教学质量" : "书质量"}
+              {s.auditing && "（生成中…）"}
+            </span>
             {!s.auditing && <button onClick={s.reopenAudit}>重开一次</button>}
           </div>
           <AuditView raw={s.auditText} />
@@ -233,6 +306,16 @@ export default function Page() {
           onResume={(sid) => {
             s.setShowHistory(false);
             s.start(sid);
+          }}
+        />
+      )}
+
+      {s.showUpload && (
+        <UploadBook
+          onClose={() => s.setShowUpload(false)}
+          onImported={(slug) => {
+            s.setShowUpload(false);
+            void s.refreshBooks(slug);
           }}
         />
       )}

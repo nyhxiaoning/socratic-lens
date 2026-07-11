@@ -343,8 +343,13 @@ export async function* runSession(
       return;
     }
     meta = await readJson<SessionMeta>(metaPath);
-    if (meta.status === "done") {
-      yield { type: "error", message: "该会话已完成，不能续跑" };
+    // 到轮次上限（done）或手动停止（aborted）都允许"继续对话"续跑，
+    // 只要新的 maxTurns 比已跑轮数大。否则提示增大轮数。
+    if (meta.status === "done" && input.maxTurns <= meta.turnsSoFar) {
+      yield {
+        type: "error",
+        message: `该会话已跑满 ${meta.turnsSoFar} 轮，续跑需要更大的轮数上限`,
+      };
       return;
     }
     meta.status = "running";
@@ -518,16 +523,31 @@ export async function* runSession(
         teacherWindow.visibleTurns,
         TEACHER_OPENING_TRIGGER,
       );
+      // 强制教师首句非空：LLM 偶尔会吐空串（尤其首轮），空串会导致学生"对着空气作答"。
+      // 空则最多重试 2 次；仍空就中止本轮并报错，绝不放行到学生侧。
       let teacherText = "";
-      for await (const chunk of callLLM("teacher", teacherMsgs, {
-        stream: true,
-        temperature: 0.7,
-        maxTokens: 800,
-        signal: input.signal,
-        onUsage: recordUsage("teacher", turnIdx),
-      })) {
-        teacherText += chunk;
-        yield { type: "chunk", actor: "teacher", turn: turnIdx, text: chunk };
+      const TEACHER_MAX_ATTEMPTS = 3;
+      for (let attempt = 1; attempt <= TEACHER_MAX_ATTEMPTS; attempt++) {
+        if (input.signal.aborted) break;
+        teacherText = "";
+        for await (const chunk of callLLM("teacher", teacherMsgs, {
+          stream: true,
+          temperature: 0.7,
+          maxTokens: 800,
+          signal: input.signal,
+          onUsage: recordUsage("teacher", turnIdx),
+        })) {
+          teacherText += chunk;
+          yield { type: "chunk", actor: "teacher", turn: turnIdx, text: chunk };
+        }
+        if (teacherText.trim() !== "") break;
+        // 空输出：重试前发一个空 turn_end 把当前教师气泡清空，重收下一次尝试的 chunk
+        if (attempt < TEACHER_MAX_ATTEMPTS && !input.signal.aborted) {
+          yield { type: "turn_end", actor: "teacher", turn: turnIdx, text: "" };
+        }
+      }
+      if (teacherText.trim() === "" && !input.signal.aborted) {
+        throw new Error("教师连续多次输出为空，已中止本轮");
       }
       const teacherTurn: Turn = {
         turn: turnIdx,

@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { readSse } from "@/lib/sse";
 import {
+  LEARNERS,
+  PACINGS,
   type LearnerId,
   type Pacing,
   type CoachAnalysis,
@@ -14,6 +16,8 @@ import {
   type SessionListItem,
   type SessionEvent,
   type AuditEvent,
+  type AuditDimension,
+  type AuditHistoryItem,
 } from "@/components/types";
 
 export type Usage = { promptTokens: number; completionTokens: number; costCny: number };
@@ -32,6 +36,24 @@ export function useSession() {
   const [learnerCoachEnabled, setLearnerCoachEnabled] = useState<boolean>(true);
   const [maxTurns, setMaxTurns] = useState<number>(6);
 
+  // 批量矩阵生成：同一节 × 多画像 × 多节奏
+  const [batchMode, setBatchMode] = useState<boolean>(false);
+  const [selectedLearners, setSelectedLearners] = useState<Set<LearnerId>>(
+    new Set<LearnerId>(["novice", "mid", "critic"]),
+  );
+  const [selectedPacings, setSelectedPacings] = useState<Set<Pacing>>(
+    new Set<Pacing>(["normal"]),
+  );
+  type BatchRun = {
+    learnerId: LearnerId;
+    pacing: Pacing;
+    sid: string;
+    status: "queued" | "running" | "done" | "error";
+  };
+  const [batchRuns, setBatchRuns] = useState<BatchRun[]>([]);
+  const [batchRunning, setBatchRunning] = useState<boolean>(false);
+  const batchStopRef = useRef<boolean>(false);
+
   const [messages, setMessages] = useState<Msg[]>([]);
   const [coachHistory, setCoachHistory] = useState<{ turn: number; analysis: CoachAnalysis }[]>([]);
   const [learnerCoachHistory, setLearnerCoachHistory] = useState<
@@ -44,8 +66,10 @@ export function useSession() {
   const [windowInfo, setWindowInfo] = useState<WindowInfo | null>(null);
   const [running, setRunning] = useState(false);
   const [sid, setSid] = useState<string>("");
+  const [turnsSoFar, setTurnsSoFar] = useState<number>(0);
   const [error, setError] = useState<string>("");
   const [modalSection, setModalSection] = useState<{ id: string; text: string } | null>(null);
+  const [showUpload, setShowUpload] = useState<boolean>(false);
 
   // 审计
   const [auditText, setAuditText] = useState<string>("");
@@ -53,6 +77,8 @@ export function useSession() {
   const [showAuditPanel, setShowAuditPanel] = useState<boolean>(false);
   const [existingSessions, setExistingSessions] = useState<SessionListItem[]>([]);
   const [pickedSids, setPickedSids] = useState<Set<string>>(new Set());
+  const [auditDimension, setAuditDimension] = useState<AuditDimension>("book");
+  const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const auditAbortRef = useRef<AbortController | null>(null);
@@ -68,6 +94,18 @@ export function useSession() {
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  /** 重新拉书列表；可选传 selectSlug 拉完后选中它（上传成功后用）。 */
+  async function refreshBooks(selectSlug?: string) {
+    try {
+      const r = await fetch("/api/books");
+      const d = await r.json();
+      setBooks(d.books || []);
+      if (selectSlug) setBookSlug(selectSlug);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   useEffect(() => {
     if (!bookSlug) return;
@@ -116,6 +154,7 @@ export function useSession() {
     }
     setCitations(map);
     setUsage(d.usageSummary ? (d.usageSummary as Usage) : ZERO_USAGE);
+    setTurnsSoFar(d.meta.turnsSoFar ?? 0);
     setBookSlug(d.meta.bookSlug);
     setSectionId(d.meta.sectionId);
     setLearnerId(d.meta.learnerId);
@@ -177,6 +216,8 @@ export function useSession() {
           }
           return copy;
         });
+        // 学生说完这一轮才算完整完成，更新已跑轮数
+        if (ev.actor === "learner") setTurnsSoFar(ev.turn);
         break;
       case "error":
         setError(ev.message);
@@ -205,7 +246,7 @@ export function useSession() {
     }
   }
 
-  async function start(resumeSid?: string) {
+  async function start(resumeSid?: string, maxTurnsOverride?: number) {
     setError("");
     setMessages([]);
     setCoachHistory([]);
@@ -213,6 +254,7 @@ export function useSession() {
     setCitations(new Map());
     setUsage(ZERO_USAGE);
     setSid("");
+    setTurnsSoFar(0);
     setAuditText("");
     setShowAuditPanel(false);
     setWindowInfo(null);
@@ -233,14 +275,15 @@ export function useSession() {
       }
     }
 
+    const effectiveMaxTurns = maxTurnsOverride ?? maxTurns;
     try {
       const resp = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           resumeSid
-            ? { resumeSid, pacing, coachEnabled, learnerCoachEnabled, maxTurns }
-            : { bookSlug, sectionId, learnerId, pacing, coachEnabled, learnerCoachEnabled, maxTurns },
+            ? { resumeSid, pacing, coachEnabled, learnerCoachEnabled, maxTurns: effectiveMaxTurns }
+            : { bookSlug, sectionId, learnerId, pacing, coachEnabled, learnerCoachEnabled, maxTurns: effectiveMaxTurns },
         ),
         signal: ctrl.signal,
       });
@@ -254,18 +297,142 @@ export function useSession() {
     }
   }
 
+  /** 继续对话：对已停止/到轮次的会话再跑 extra 轮（默认 6）。 */
+  function continueSession(extra = 6) {
+    if (!sid) return;
+    void start(sid, turnsSoFar + Math.max(1, extra));
+  }
+
   function stop() {
+    batchStopRef.current = true;
     abortRef.current?.abort();
+  }
+
+  function toggleLearner(id: LearnerId) {
+    setSelectedLearners((prev) => {
+      const copy = new Set(prev);
+      if (copy.has(id)) copy.delete(id);
+      else copy.add(id);
+      return copy;
+    });
+  }
+  function togglePacing(id: Pacing) {
+    setSelectedPacings((prev) => {
+      const copy = new Set(prev);
+      if (copy.has(id)) copy.delete(id);
+      else copy.add(id);
+      return copy;
+    });
+  }
+
+  /**
+   * 批量矩阵：同一节 × 选中的画像 × 选中的节奏，串行逐个跑。
+   * 每个会话仍实时流进 ChatView。全部完成后把这批 sid 预勾选进审计选择器。
+   */
+  async function runBatch() {
+    if (!bookSlug || !sectionId) {
+      setError("请先选书和节");
+      return;
+    }
+    const learners = LEARNERS.map((l) => l.id).filter((id) => selectedLearners.has(id));
+    const pacings = PACINGS.map((p) => p.id).filter((id) => selectedPacings.has(id));
+    if (learners.length === 0 || pacings.length === 0) {
+      setError("批量至少各选一个画像和一个节奏");
+      return;
+    }
+
+    // 展开矩阵（画像外层、节奏内层，顺序稳定）
+    const combos: { learnerId: LearnerId; pacing: Pacing }[] = [];
+    for (const l of learners) for (const p of pacings) combos.push({ learnerId: l, pacing: p });
+
+    setError("");
+    setShowAuditPanel(false);
+    setAuditText("");
+    setBatchRunning(true);
+    batchStopRef.current = false;
+    const runs: BatchRun[] = combos.map((c) => ({ ...c, sid: "", status: "queued" }));
+    setBatchRuns(runs);
+
+    const doneSids: string[] = [];
+    for (let i = 0; i < combos.length; i++) {
+      if (batchStopRef.current) break;
+      const { learnerId: l, pacing: p } = combos[i];
+      runs[i] = { ...runs[i], status: "running" };
+      setBatchRuns([...runs]);
+
+      // 重置对话视图，跑这一个组合
+      setMessages([]);
+      setCoachHistory([]);
+      setLearnerCoachHistory([]);
+      setCitations(new Map());
+      setUsage(ZERO_USAGE);
+      setSid("");
+      setTurnsSoFar(0);
+      setWindowInfo(null);
+      setRunning(true);
+
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      let capturedSid = "";
+      try {
+        const resp = await fetch("/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bookSlug,
+            sectionId,
+            learnerId: l,
+            pacing: p,
+            coachEnabled,
+            learnerCoachEnabled,
+            maxTurns,
+          }),
+          signal: ctrl.signal,
+        });
+        if (!resp.ok || !resp.body) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+        await readSse<SessionEvent>(resp, (ev) => {
+          if (ev.type === "meta") capturedSid = ev.meta.sid;
+          handleEvent(ev);
+        });
+        runs[i] = { ...runs[i], sid: capturedSid, status: "done" };
+        if (capturedSid) doneSids.push(capturedSid);
+      } catch (e) {
+        if ((e as Error).name === "AbortError") {
+          runs[i] = { ...runs[i], sid: capturedSid, status: "error" };
+          if (capturedSid) doneSids.push(capturedSid); // 半截也留着可续跑/可审
+          setBatchRuns([...runs]);
+          break;
+        }
+        runs[i] = { ...runs[i], sid: capturedSid, status: "error" };
+        setError((e as Error).message);
+      } finally {
+        setRunning(false);
+        abortRef.current = null;
+      }
+      setBatchRuns([...runs]);
+    }
+
+    setBatchRunning(false);
+    // 全部跑完：预勾选这批 sid，方便直接送审出"单节统一报告"
+    if (doneSids.length > 0) {
+      setPickedSids(new Set(doneSids));
+    }
   }
 
   async function openAuditPanel() {
     setShowAuditPanel(true);
+    setAuditText("");
     setPickedSids(sid ? new Set([sid]) : new Set());
     if (!bookSlug) return;
     try {
-      const r = await fetch(`/api/sessions?bookSlug=${encodeURIComponent(bookSlug)}`);
-      const d = await r.json();
-      setExistingSessions(d.sessions || []);
+      const [sr, hr] = await Promise.all([
+        fetch(`/api/sessions?bookSlug=${encodeURIComponent(bookSlug)}`),
+        fetch(`/api/audits?bookSlug=${encodeURIComponent(bookSlug)}`),
+      ]);
+      const sd = await sr.json();
+      setExistingSessions(sd.sessions || []);
+      const hd = await hr.json();
+      setAuditHistory(hd.audits || []);
     } catch (e) {
       setError(String(e));
     }
@@ -280,7 +447,7 @@ export function useSession() {
     });
   }
 
-  async function runAudit(sids: string[]) {
+  async function runAudit(sids: string[], dimension: AuditDimension = auditDimension) {
     if (sids.length === 0) {
       setError("请至少选一个会话");
       return;
@@ -294,7 +461,7 @@ export function useSession() {
       const resp = await fetch(`/api/audits`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sids }),
+        body: JSON.stringify({ sids, dimension }),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
@@ -313,6 +480,24 @@ export function useSession() {
     } finally {
       setAuditing(false);
       auditAbortRef.current = null;
+    }
+  }
+
+  /** 载入一条历史审计报告到查看区（只读）。 */
+  async function viewAudit(aid: string) {
+    setError("");
+    setShowAuditPanel(false);
+    try {
+      const r = await fetch(`/api/audits/${aid}`);
+      const d = await r.json();
+      if (d.report?.raw) {
+        setAuditDimension((d.meta?.dimension as AuditDimension) ?? "book");
+        setAuditText(d.report.raw);
+      } else {
+        setError(d.error || "审计不存在");
+      }
+    } catch (e) {
+      setError((e as Error).message);
     }
   }
 
@@ -353,16 +538,21 @@ export function useSession() {
     sectionId, setSectionId, learnerId, setLearnerId, pacing, setPacing,
     coachEnabled, setCoachEnabled, learnerCoachEnabled, setLearnerCoachEnabled,
     maxTurns, setMaxTurns, canStart,
+    // 批量矩阵
+    batchMode, setBatchMode, selectedLearners, toggleLearner,
+    selectedPacings, togglePacing, batchRuns, batchRunning, runBatch,
     // 对话
     messages, coachHistory, learnerCoachHistory, citations, usage, windowInfo,
-    running, sid, error, scrollRef,
+    running, sid, turnsSoFar, error, scrollRef,
     // 审计
     auditText, auditing, showAuditPanel, setShowAuditPanel, existingSessions,
     pickedSids, togglePick, auditRef,
+    auditDimension, setAuditDimension, auditHistory, viewAudit,
     // 历史 / 弹窗
     showHistory, setShowHistory, historyItems, modalSection, setModalSection,
+    showUpload, setShowUpload, refreshBooks,
     // 动作
-    start, stop, openAuditPanel, runAudit, stopAudit, reopenAudit,
+    start, stop, continueSession, openAuditPanel, runAudit, stopAudit, reopenAudit,
     openSection, openHistory, loadSessionIntoView,
   };
 }

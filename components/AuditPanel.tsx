@@ -1,5 +1,13 @@
 import { useMemo } from "react";
-import { LEARNERS, SECTION_LABELS, type BookSummary, type SessionListItem } from "./types";
+import {
+  AUDIT_DIMENSIONS,
+  LEARNERS,
+  SECTION_LABELS,
+  type AuditDimension,
+  type AuditHistoryItem,
+  type BookSummary,
+  type SessionListItem,
+} from "./types";
 
 export function AuditPicker({
   book,
@@ -7,6 +15,10 @@ export function AuditPicker({
   sessions,
   picked,
   onTogglePick,
+  dimension,
+  onDimension,
+  history,
+  onViewHistory,
   onCancel,
   onSubmit,
 }: {
@@ -15,6 +27,10 @@ export function AuditPicker({
   sessions: SessionListItem[];
   picked: Set<string>;
   onTogglePick: (sid: string) => void;
+  dimension: AuditDimension;
+  onDimension: (d: AuditDimension) => void;
+  history: AuditHistoryItem[];
+  onViewHistory: (aid: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
 }) {
@@ -28,6 +44,8 @@ export function AuditPicker({
   }, [sessions]);
 
   const orderedSectionIds = book?.sections.map((s) => s.id) ?? [];
+  const dimLabel = (d: AuditDimension) =>
+    AUDIT_DIMENSIONS.find((x) => x.id === d)?.label ?? d;
 
   return (
     <section
@@ -49,13 +67,31 @@ export function AuditPicker({
       >
         <strong style={{ fontSize: 14 }}>选要一起送审的会话</strong>
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
-          勾选后点"开始审计"。跨多节 = 合审。已选 {picked.size} 个
+          跨多节 = 合审。已选 {picked.size} 个
         </div>
+      </div>
+
+      {/* 审计维度切换 */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        {AUDIT_DIMENSIONS.map((d) => (
+          <button
+            key={d.id}
+            onClick={() => onDimension(d.id)}
+            title={d.desc}
+            className={dimension === d.id ? "primary" : undefined}
+            style={{ fontSize: 12 }}
+          >
+            {d.label}
+          </button>
+        ))}
+        <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
+          {AUDIT_DIMENSIONS.find((x) => x.id === dimension)?.desc}
+        </span>
       </div>
 
       <div
         style={{
-          maxHeight: 300,
+          maxHeight: 260,
           overflowY: "auto",
           padding: 8,
           background: "var(--bg)",
@@ -112,10 +148,65 @@ export function AuditPicker({
         )}
       </div>
 
+      {/* 审计历史 */}
+      {history.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+            本书审计历史（点击回看）
+          </div>
+          <div
+            style={{
+              maxHeight: 140,
+              overflowY: "auto",
+              padding: 8,
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+            }}
+          >
+            {history.map((h) => (
+              <button
+                key={h.aid}
+                onClick={() => onViewHistory(h.aid)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "4px 6px",
+                  fontSize: 12,
+                  background: "transparent",
+                  border: "none",
+                  borderBottom: "1px solid var(--border)",
+                  cursor: "pointer",
+                }}
+                title={h.verdict}
+              >
+                <span
+                  style={{
+                    color: h.dimension === "teacher" ? "var(--accent)" : "var(--muted)",
+                    marginRight: 6,
+                  }}
+                >
+                  [{dimLabel(h.dimension)}]
+                </span>
+                <span style={{ color: "var(--muted)" }}>
+                  {h.sectionIds.map((s) => "§" + s).join(" ")} · {h.sidCount} 会话
+                </span>
+                {h.verdict && (
+                  <span style={{ display: "block", color: "var(--muted)", opacity: 0.85 }}>
+                    {h.verdict.length > 60 ? h.verdict.slice(0, 60) + "…" : h.verdict}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end", gap: 8 }}>
         <button onClick={onCancel}>取消</button>
         <button className="primary" onClick={onSubmit} disabled={picked.size === 0}>
-          开始审计（{picked.size}）
+          开始审计 · {dimLabel(dimension)}（{picked.size}）
         </button>
       </div>
     </section>
