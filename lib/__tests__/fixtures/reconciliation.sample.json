@@ -1,0 +1,8 @@
+{
+  "rows": [
+    { "checklistId": "kp1", "category": "knowledgePoint", "itemName": "there be 句型", "status": "landed", "synthQuote": "There is a book on the desk." },
+    { "checklistId": "kp2", "category": "knowledgePoint", "itemName": "冠词 a/an/the", "status": "morphed", "synthQuote": "a book", "note": "只讲了 a，漏 the 的特指" },
+    { "checklistId": "ex1", "category": "exercise", "itemName": "There ___ three books.", "status": "dropped", "note": "合成节无等价练习" }
+  ],
+  "verdict": "保真度中等：核心句型落地，但冠词讲窄、原题未覆盖。"
+}
