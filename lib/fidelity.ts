@@ -1,3 +1,5 @@
+import { normalizeForMatch } from "./citations";
+
 // —— 类型契约（见 plan）——
 export type KnowledgePoint = { id: string; name: string; sourceQuote: string; note?: string };
 export type Criterion = { id: string; desc: string; sourceQuote: string };
@@ -123,4 +125,28 @@ export function parseReconciliation(raw: string): Row[] {
   });
   if (rows.length === 0) throw new Error("Fidelity: 勾稽表没有任何行");
   return rows;
+}
+
+/** 校验每行的 synthQuote 是否逐字（规范化后）出现在合成节里。返回带 quoteUnverified 的新数组。 */
+export function verifyQuotes(rows: Row[], synthText: string): Row[] {
+  const normText = normalizeForMatch(synthText);
+  return rows.map((r) => {
+    if (!r.synthQuote) return { ...r, quoteUnverified: false };
+    const needle = normalizeForMatch(r.synthQuote);
+    const hit = needle.length === 0 ? true : normText.includes(needle);
+    return { ...r, quoteUnverified: !hit };
+  });
+}
+
+/** 覆盖率：landed / total（morphed 不计入 landed）。 */
+export function computeCoverage(rows: Row[]): Coverage {
+  let landed = 0, morphed = 0, dropped = 0;
+  for (const r of rows) {
+    if (r.status === "landed") landed++;
+    else if (r.status === "morphed") morphed++;
+    else dropped++;
+  }
+  const total = rows.length;
+  const coverageRate = total === 0 ? 0 : Math.round((landed / total) * 100) / 100;
+  return { total, landed, morphed, dropped, coverageRate };
 }
