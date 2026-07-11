@@ -1,3 +1,6 @@
+import path from "node:path";
+import { callLLM } from "./llm";
+import { readText, PROMPTS_ROOT } from "./storage";
 import { normalizeForMatch } from "./citations";
 
 // —— 类型契约（见 plan）——
@@ -201,4 +204,60 @@ export function renderChecklistMd(c: Checklist): string {
   lines.push(c.errorSpots.length ? c.errorSpots.map((s) => `- ${s.desc}（${s.id}）\n  > ${s.sourceQuote}`).join("\n") : "- 无");
   lines.push(``);
   return lines.join("\n");
+}
+
+const MAX_LLM_ATTEMPTS = 2;
+
+/** 抽清单：读源章 → LLM → 结构化 Checklist。解析失败重试 1 次。 */
+export async function extractChecklist(sourceText: string, signal: AbortSignal): Promise<Checklist> {
+  const rules = await readText(path.join(PROMPTS_ROOT, "fidelity_extract.md"));
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+    const raw = await callLLM(
+      "audit",
+      [
+        { role: "system", content: rules },
+        { role: "user", content: `## 源材料（本章）\n\n${sourceText}` },
+      ],
+      { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
+    );
+    try {
+      return parseChecklist(raw);
+    } catch (e) {
+      lastErr = e;
+      if (signal.aborted) break;
+    }
+  }
+  throw new Error(`Fidelity 抽清单失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+}
+
+/** 勾稽：清单 + 合成节 → LLM → Row[]（含 verbatim 校验）。解析失败重试 1 次。 */
+export async function reconcile(checklist: Checklist, synthText: string, signal: AbortSignal): Promise<Row[]> {
+  const rules = await readText(path.join(PROMPTS_ROOT, "fidelity_reconcile.md"));
+  const user = [
+    `## 源材料清单（JSON）`,
+    JSON.stringify(checklist, null, 2),
+    ``,
+    `## 合成的教学蓝本（本节）`,
+    synthText,
+  ].join("\n");
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+    const raw = await callLLM(
+      "audit",
+      [
+        { role: "system", content: rules },
+        { role: "user", content: user },
+      ],
+      { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
+    );
+    try {
+      const rows = parseReconciliation(raw);
+      return verifyQuotes(rows, synthText);
+    } catch (e) {
+      lastErr = e;
+      if (signal.aborted) break;
+    }
+  }
+  throw new Error(`Fidelity 勾稽失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
