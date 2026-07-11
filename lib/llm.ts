@@ -5,6 +5,13 @@ export type Purpose = "teacher" | "learner" | "audit" | "coach";
 
 export type LLMMessage = { role: "system" | "user" | "assistant"; content: string };
 
+/** 一次调用的 token 用量。字段直接来自 OpenAI/兼容端点的 usage 对象。 */
+export type LLMUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type LLMOptions = {
   stream?: boolean;
   maxTokens?: number;
@@ -12,6 +19,8 @@ export type LLMOptions = {
   signal?: AbortSignal;
   /** 强制模型输出 JSON（OpenAI 兼容 response_format=json_object）。仅非流式生效。 */
   jsonMode?: boolean;
+  /** 拿到 usage 时的回调（不是所有 provider 都会给；给了才调）。 */
+  onUsage?: (u: LLMUsage) => void;
 };
 
 function requireEnv(key: string): string {
@@ -42,9 +51,25 @@ function logCall(
   inputChars: number,
   outputChars: number,
   ms: number,
+  usage?: LLMUsage,
 ): void {
   console.log(
-    JSON.stringify({ tag: "llm", purpose, model, msgCount, inputChars, outputChars, ms }),
+    JSON.stringify({
+      tag: "llm",
+      purpose,
+      model,
+      msgCount,
+      inputChars,
+      outputChars,
+      ms,
+      ...(usage
+        ? {
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            totalTokens: usage.totalTokens,
+          }
+        : {}),
+    }),
   );
 }
 
@@ -79,11 +104,14 @@ export function callLLM(
   if (opts.stream) {
     return (async function* () {
       let outputChars = 0;
+      let usage: LLMUsage | undefined;
       const stream = await client.chat.completions.create(
         {
           model,
           messages: sdkMessages,
           stream: true,
+          // 让流的最后一个 chunk 带 usage（OpenAI 兼容参数）
+          stream_options: { include_usage: true },
           max_tokens: opts.maxTokens,
           temperature: opts.temperature,
         },
@@ -96,9 +124,19 @@ export function callLLM(
             outputChars += delta.length;
             yield delta;
           }
+          // 最后一个 chunk 通常 choices=[]，usage 在这里
+          const u = chunk.usage;
+          if (u) {
+            usage = {
+              promptTokens: u.prompt_tokens ?? 0,
+              completionTokens: u.completion_tokens ?? 0,
+              totalTokens: u.total_tokens ?? 0,
+            };
+          }
         }
       } finally {
-        logCall(purpose, model, messages.length, inputChars, outputChars, Date.now() - t0);
+        if (usage && opts.onUsage) opts.onUsage(usage);
+        logCall(purpose, model, messages.length, inputChars, outputChars, Date.now() - t0, usage);
       }
     })();
   }
@@ -116,7 +154,16 @@ export function callLLM(
       { signal: opts.signal },
     );
     const text = resp.choices?.[0]?.message?.content ?? "";
-    logCall(purpose, model, messages.length, inputChars, text.length, Date.now() - t0);
+    let usage: LLMUsage | undefined;
+    if (resp.usage) {
+      usage = {
+        promptTokens: resp.usage.prompt_tokens ?? 0,
+        completionTokens: resp.usage.completion_tokens ?? 0,
+        totalTokens: resp.usage.total_tokens ?? 0,
+      };
+      if (opts.onUsage) opts.onUsage(usage);
+    }
+    logCall(purpose, model, messages.length, inputChars, text.length, Date.now() - t0, usage);
     return text;
   })();
 }

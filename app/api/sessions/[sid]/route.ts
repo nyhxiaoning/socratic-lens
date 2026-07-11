@@ -1,7 +1,8 @@
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { readJson, readText, SESSIONS_ROOT, exists } from "@/lib/storage";
-import type { SessionMeta } from "@/lib/session";
+import type { SessionMeta, UsageRecord } from "@/lib/session";
+import type { Citation } from "@/lib/citations";
 
 export const runtime = "nodejs";
 
@@ -39,5 +40,28 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   const learnerCoach = await loadJsonl<{ turn: number; ts: number; analysis: unknown }>(
     path.join(dir, "learner_coach.jsonl"),
   );
-  return NextResponse.json({ meta, turns, teacherCoach, learnerCoach });
+  const usage = await loadJsonl<UsageRecord>(path.join(dir, "usage.jsonl"));
+  const citations = await loadJsonl<{ turn: number; ts: number; cites: Citation[] }>(
+    path.join(dir, "citations.jsonl"),
+  );
+
+  // usage 汇总
+  const usageSummary = usage.reduce(
+    (s, r) => ({
+      promptTokens: s.promptTokens + r.promptTokens,
+      completionTokens: s.completionTokens + r.completionTokens,
+      costCny: s.costCny + r.costCny,
+    }),
+    { promptTokens: 0, completionTokens: 0, costCny: 0 },
+  );
+
+  return NextResponse.json({
+    meta,
+    turns,
+    teacherCoach,
+    learnerCoach,
+    usage,
+    usageSummary,
+    citations,
+  });
 }
