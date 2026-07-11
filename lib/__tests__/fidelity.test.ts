@@ -131,3 +131,10 @@ test("renderChecklistMd: 四类都出小标题", () => {
   assert.match(md, /教材原题/);
   assert.match(md, /易错点/);
 });
+
+import { newFid } from "../fidelity";
+
+test("newFid: 形如 f-<14位数字>-<6位>", () => {
+  const id = newFid();
+  assert.match(id, /^f-\d{14}-[a-z0-9]{6}$/);
+});
