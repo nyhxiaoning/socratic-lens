@@ -258,7 +258,7 @@ export default function Page() {
           history={s.auditHistory}
           onViewHistory={s.viewAudit}
           onCancel={() => s.setShowAuditPanel(false)}
-          onSubmit={() => s.runAudit(Array.from(s.pickedSids))}
+          onSubmit={(sampleName?: string) => s.runAudit(Array.from(s.pickedSids), s.auditDimension, sampleName)}
         />
       )}
 

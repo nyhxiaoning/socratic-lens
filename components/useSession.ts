@@ -447,8 +447,10 @@ export function useSession() {
     });
   }
 
-  async function runAudit(sids: string[], dimension: AuditDimension = auditDimension) {
-    if (sids.length === 0) {
+  async function runAudit(sids: string[], dimension: AuditDimension = auditDimension, sampleName?: string) {
+    if (dimension === "fidelity") {
+      if (!sampleName) { setError("保真度审计需要选一个样本"); return; }
+    } else if (sids.length === 0) {
       setError("请至少选一个会话");
       return;
     }
@@ -458,10 +460,16 @@ export function useSession() {
     const ctrl = new AbortController();
     auditAbortRef.current = ctrl;
     try {
+      const body: Record<string, unknown> = { dimension };
+      if (dimension === "fidelity") {
+        body.sampleName = sampleName;
+      } else {
+        body.sids = sids;
+      }
       const resp = await fetch(`/api/audits`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sids, dimension }),
+        body: JSON.stringify(body),
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) throw new Error((await resp.text()) || `HTTP ${resp.status}`);

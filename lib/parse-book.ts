@@ -3,9 +3,13 @@
  * 因此前端预览和后端落盘可以共用同一份逻辑，保证"预览所见 = 入库所得"。
  * 逻辑取自 scripts/import-mineru.mjs。
  *
- * 边界识别：`## 导论` / `## 第X章 ...` / `## 第X节 ...`
- * - 章标题只用来标注归属（section.title 前缀），不单独成节
- * - 导论、各节成为 section
+ * 边界识别：
+ * - `## 导论` / `# 导论`
+ * - `## 第X章 ...` / `## 第X节 ...`（中文数字章/节）
+ * - `# Part X ...` / `# Unit X ...`（英文书 Part/Unit 结构）
+ * - `## Part X ...` / `## Unit X ...`（二级标题版）
+ * 章标题/Part 只用来标注归属（section.title 前缀），不单独成节。
+ * 导论、各节、Unit、第X节成为 section。
  */
 export type ParsedSection = { id: string; title: string; body: string };
 export type ParsedBook = {
@@ -30,16 +34,55 @@ export function parseMarkdownToBook(raw: string): ParsedBook {
 
   type Boundary = { lineIdx: number; kind: "intro" | "chapter" | "section"; text: string };
   const boundaries: Boundary[] = [];
+
+  let firstH1Found = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line.startsWith("## ")) continue;
-    const t = line.slice(3).trim();
+    const isH1 = line.startsWith("# ") && !line.startsWith("## ");
+    const isH2 = line.startsWith("## ");
+    if (!isH1 && !isH2) continue;
+
+    const t = (isH1 ? line.slice(2) : line.slice(3)).trim();
+
+    // 第一个 # 一级标题 = 书名，跳过不当作节边界
+    if (isH1 && !firstH1Found) {
+      firstH1Found = true;
+      continue;
+    }
+
+    // ## 导论 / # 导论
     if (t === "导论") {
       boundaries.push({ lineIdx: i, kind: "intro", text: "导论" });
-    } else if (/^第[一二三四五六七八九十]+章\s/.test(t)) {
+      continue;
+    }
+
+    // 中文数字章/节
+    if (isH2) {
+      if (/^第[一二三四五六七八九十]+章\s/.test(t)) {
+        // 章标题可能含节引用：`第一章 世界的物质性｜第一节 世界的多样性与物质统一性`
+        const pipeIdx = t.indexOf("｜");
+        if (pipeIdx > 0 && /^第[一二三四五六七八九十]+节/.test(t.slice(pipeIdx + 1))) {
+          boundaries.push({ lineIdx: i, kind: "chapter", text: t.slice(0, pipeIdx) });
+          boundaries.push({ lineIdx: i, kind: "section", text: t.slice(pipeIdx + 1) });
+        } else {
+          boundaries.push({ lineIdx: i, kind: "chapter", text: t });
+        }
+        continue;
+      }
+      if (/^第[一二三四五六七八九十]+节\s/.test(t)) {
+        boundaries.push({ lineIdx: i, kind: "section", text: t });
+        continue;
+      }
+    }
+
+    // 英文书 Part / Unit 结构（# 或 ## 级别均可）
+    if (/^Part\s+\d+/i.test(t)) {
       boundaries.push({ lineIdx: i, kind: "chapter", text: t });
-    } else if (/^第[一二三四五六七八九十]+节\s/.test(t)) {
+      continue;
+    }
+    if (/^Unit\s+\d+/i.test(t)) {
       boundaries.push({ lineIdx: i, kind: "section", text: t });
+      continue;
     }
   }
 

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   AUDIT_DIMENSIONS,
   LEARNERS,
@@ -32,7 +32,7 @@ export function AuditPicker({
   history: AuditHistoryItem[];
   onViewHistory: (aid: string) => void;
   onCancel: () => void;
-  onSubmit: () => void;
+  onSubmit: (sampleName?: string) => void;
 }) {
   const grouped = useMemo(() => {
     const map = new Map<string, SessionListItem[]>();
@@ -46,6 +46,21 @@ export function AuditPicker({
   const orderedSectionIds = book?.sections.map((s) => s.id) ?? [];
   const dimLabel = (d: AuditDimension) =>
     AUDIT_DIMENSIONS.find((x) => x.id === d)?.label ?? d;
+
+  // Fidelity 样本选择
+  const [samples, setSamples] = useState<{ name: string; hasSource: boolean; hasSynth: boolean }[]>([]);
+  const [selectedSample, setSelectedSample] = useState<string>("");
+  useEffect(() => {
+    if (dimension === "fidelity") {
+      fetch("/api/fidelity-samples")
+        .then((r) => r.json())
+        .then((d) => {
+          setSamples(d.samples || []);
+          if (d.samples?.[0]) setSelectedSample(d.samples[0].name);
+        })
+        .catch(() => {});
+    }
+  }, [dimension]);
 
   return (
     <section
@@ -65,9 +80,9 @@ export function AuditPicker({
           alignItems: "center",
         }}
       >
-        <strong style={{ fontSize: 14 }}>选要一起送审的会话</strong>
+        <strong style={{ fontSize: 14 }}>{dimension === "fidelity" ? "选要审的保真度样本" : "选要一起送审的会话"}</strong>
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
-          跨多节 = 合审。已选 {picked.size} 个
+          {dimension === "fidelity" ? "源材料 vs 合成节 勾稽" : `跨多节 = 合审。已选 ${picked.size} 个`}
         </div>
       </div>
 
@@ -89,64 +104,109 @@ export function AuditPicker({
         </span>
       </div>
 
-      <div
-        style={{
-          maxHeight: 260,
-          overflowY: "auto",
-          padding: 8,
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 6,
-        }}
-      >
-        {orderedSectionIds
-          .filter((sid) => grouped.has(sid))
-          .map((secId) => {
-            const list = grouped.get(secId)!;
-            const secTitle = book?.sections.find((s) => s.id === secId)?.title ?? secId;
-            return (
-              <div key={secId} style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                  §{secId} {secTitle}
+      {/* Fidelity 保真度审计：选样本 */}
+      {dimension === "fidelity" ? (
+        <div
+          style={{
+            maxHeight: 200,
+            overflowY: "auto",
+            padding: 8,
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+          }}
+        >
+          {samples.length === 0 ? (
+            <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
+              没有找到保真度审计样本。请先在 <code>data/fidelity-samples/</code> 下建样本。
+            </div>
+          ) : (
+            samples.filter((s) => s.hasSource && s.hasSynth).map((s) => (
+              <label
+                key={s.name}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "4px 6px",
+                  fontSize: 13,
+                  cursor: "pointer",
+                  background: selectedSample === s.name ? "var(--teacher)" : "transparent",
+                  borderRadius: 4,
+                }}
+              >
+                <input
+                  type="radio"
+                  name="fidelity-sample"
+                  checked={selectedSample === s.name}
+                  onChange={() => setSelectedSample(s.name)}
+                />
+                {s.name}
+              </label>
+            ))
+          )}
+        </div>
+      ) : (
+        /* 普通审计：选会话 */
+        <div
+          style={{
+            maxHeight: 260,
+            overflowY: "auto",
+            padding: 8,
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+          }}
+        >
+          {orderedSectionIds
+            .filter((sid) => grouped.has(sid))
+            .map((secId) => {
+              const list = grouped.get(secId)!;
+              const secTitle = book?.sections.find((s) => s.id === secId)?.title ?? secId;
+              return (
+                <div key={secId} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+                    §{secId} {secTitle}
+                  </div>
+                  {list.map((s) => (
+                    <label
+                      key={s.sid}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "4px 6px",
+                        fontSize: 13,
+                        cursor: "pointer",
+                        background: picked.has(s.sid) ? "var(--teacher)" : "transparent",
+                        borderRadius: 4,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={picked.has(s.sid)}
+                        onChange={() => onTogglePick(s.sid)}
+                      />
+                      <span style={{ color: s.status === "done" ? "inherit" : "var(--muted)" }}>
+                        {s.sid}
+                        {s.sid === currentSid && "（本次）"}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
+                        {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+                        {s.status}
+                      </span>
+                    </label>
+                  ))}
                 </div>
-                {list.map((s) => (
-                  <label
-                    key={s.sid}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "4px 6px",
-                      fontSize: 13,
-                      cursor: "pointer",
-                      background: picked.has(s.sid) ? "var(--teacher)" : "transparent",
-                      borderRadius: 4,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={picked.has(s.sid)}
-                      onChange={() => onTogglePick(s.sid)}
-                    />
-                    <span style={{ color: s.status === "done" ? "inherit" : "var(--muted)" }}>
-                      {s.sid}
-                      {s.sid === currentSid && "（本次）"}
-                    </span>
-                    <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
-                      {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
-                      {s.status}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            );
-          })}
-        {sessions.length === 0 && (
-          <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
-            这本书还没有其它会话。审计当前这次即可。
-          </div>
-        )}
-      </div>
+              );
+            })}
+          {sessions.length === 0 && (
+            <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
+              这本书还没有其它会话。审计当前这次即可。
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 审计历史 */}
       {history.length > 0 && (
@@ -205,9 +265,15 @@ export function AuditPicker({
 
       <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end", gap: 8 }}>
         <button onClick={onCancel}>取消</button>
-        <button className="primary" onClick={onSubmit} disabled={picked.size === 0}>
-          开始审计 · {dimLabel(dimension)}（{picked.size}）
-        </button>
+        {dimension === "fidelity" ? (
+          <button className="primary" onClick={() => onSubmit(selectedSample)} disabled={!selectedSample}>
+            开始审计 · 保真度（{selectedSample || "未选"}）
+          </button>
+        ) : (
+          <button className="primary" onClick={() => onSubmit()} disabled={picked.size === 0}>
+            开始审计 · {dimLabel(dimension)}（{picked.size}）
+          </button>
+        )}
       </div>
     </section>
   );
