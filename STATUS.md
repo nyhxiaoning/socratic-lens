@@ -1,8 +1,9 @@
 # STATUS.md · 项目当前状态与改进候选
 
 > **给未来的你或 AI 拿起来接着改用。**
-> 快照时间：2026-07-07
-> 最新 commit：`572c42e`（fix: 历史抽屉里的"查看"改成"载入到对话栏"）
+> 快照时间：2026-07-07（原文）+ 2026-07-11 增补一节"进行中的改进 (2026-07-11)"在文末
+> 最新 commit：`ff14e26`（chore: .env.example 补 LLM 价格变量）——本节的 2026-07-11 改动已全部提交。
+> **⚠️ 新会话打开先看文末"进行中的改进"那一节。**
 
 ## 一句话现状
 
@@ -78,7 +79,7 @@
 
 ```
 app/                              Next.js 15 app router
-  page.tsx                        观察页（Client, 约 1500 行）
+  page.tsx                        观察页（Client, 约 270 行；逻辑抽到 components/useSession.ts，UI 拆到 components/*）
   layout.tsx / globals.css
   api/
     books/route.ts                GET 书列表 + 字数
@@ -143,9 +144,9 @@ data/
 4. **老 session resume 语境不匹配**：老 session 没有 `windowStartPage`；resume 时会给它初始化一个初始窗口。老对话讲的内容可能已经在窗口之后——教师会有一小段不自然。历史包袱，跑新会话没这个问题。
 5. **翻页决策靠单条教练**：只看 `contentProgress`，且是主教练判断的（主教练本来是"看教学行为"的，判"内容进度"是搭车任务）。可能会误判、漏判。想更稳可以（a）加投票（连续 3 次），（b）另外派一个"内容进度教练"专职判。
 6. **摘要 prompt 是英式硬编码在 `session.ts` 里**——不像其它 rules 走 `prompts/*.md`。想让摘要行为可调就得改代码。
-7. **没做 verbatim 引用校验**：教师 `〔§01｜XXX〕` 里的 XXX 是不是真在原文里，服务端不校。全靠 prompt 铁律 + 审计人工审。Socratopia 有 `source_quote` 逐字比对，我们没做。
-8. **audit 只跑一次**：Socratopia `chunks/65705` 里下课解析失败会自动重试一次，我们直接失败。
-9. **成本无观测**：只在 `console.log` 里记了 input/outputChars 和 ms。没有 UI 里的成本累计。跑 120 轮 × 4 agent 时会想要这个。
+7. ~~**没做 verbatim 引用校验**~~ ✅ **已解决**（2026-07-11）：`lib/citations.ts` 逐字比对教师 `〔§01｜XXX〕`，命中/未命中落 `citations.jsonl`，未命中片段在 ChatView 里红边 + ⚠️，命中率也注入 audit。
+8. ~~**audit 只跑一次**~~ ✅ **已解决**（2026-07-11）：`lib/audit.ts` 加 `hasAllTags` + `MAX_ATTEMPTS=2`，首次 5 段 tag 不全就自动重跑一次。
+9. ~~**成本无观测**~~ ✅ **已解决**（2026-07-11）：`lib/llm.ts` 走 `stream_options.include_usage` 拿 token 用量，`lib/pricing.ts` 按 `.env` 价格换算人民币，每轮落 `usage.jsonl` + SSE `usage` 事件，页面 footer 显示 `in/out/¥`。
 10. **多进程并发**：现在假设单进程。如果哪天想跑一个 job runner 后台并发跑多 session，`SESSIONS_ROOT` 下的 `SELECT ... FOR UPDATE SKIP LOCKED` 那套要重新设计（当时被 Socratopia 逆向报告里的架构挑起过念头，V1 拍死了）。
 
 ## 下一步几个自然候选（按性价比排）
@@ -173,3 +174,46 @@ data/
 - **`CONVERSATION-CONTEXT.md`** — 旧的 Socratopia 逆向讨论快照（**与本项目无关**）。
 - **`PLAN.md`** — 项目 V1 初始设计方案（历史文档，实际实现的能力比它多）。
 - **`CLAUDE.md`** — 给 AI 助手用的项目指南（更简洁，指向具体实现）。
+
+---
+
+## 2026-07-11 完成的改进 · 5 项全部完成并提交
+
+针对上文"下一步候选"里的 #1/#2/#3 + 一项拆分。**已全部完成并提交**（见文末"提交映射"）。
+
+### 已完成（后端 + 前端全部到位）
+
+| # | 内容 | 落点 | 状态 |
+|---|---|---|---|
+| ① | 成本累计（候选 #3）| `lib/pricing.ts`（新）+ `lib/llm.ts` 加 `LLMUsage`+`onUsage`+`stream_options.include_usage` + `lib/session.ts` 每轮 4 处 callLLM 挂 `recordUsage(purpose, turn)` + 追加 `data/sessions/<sid>/usage.jsonl` + `SessionEvent` 加 `usage` 事件 + resume 时读盘累计 + `lib/coach.ts` 两个 analyze 加 `onUsage` 参数 + `.env.example` 加价格变量 + `app/page.tsx` footer 显示 `in/out/¥` | ✅ done |
+| ② | audit 按 `turnsSoFar` 截（第 154 行候选 #2）| `lib/audit.ts::loadTurns(sid, turnsSoFar)` 只保留成对的 teacher+learner 轮次；`collectMaterial` 传入 `m.turnsSoFar` | ✅ done |
+| ③ | audit 失败重试（第 147 行遗漏）| `lib/audit.ts` 加 `hasAllTags(raw)`；`runAudit` 外层 `MAX_ATTEMPTS=2` 循环，首次 5 段 tag 不全就重跑并 yield 提示 chunk | ✅ done |
+| ④ | verbatim 引用校验（候选 #1）| `lib/citations.ts`（新，含 `extractCitations` / `verifyCitation` / `verifyTurnCitations` / `aggregateCitations` / `normalizeForMatch`——规范化：全角→半角、去空白、小写化）+ `lib/session.ts` 教师 turn 结束后 verify 并追加 `data/sessions/<sid>/citations.jsonl` + `lib/audit.ts::SectionMaterial` 加 `citationRecords`，`buildAuditMessages` 注入"教师引用 X/Y 命中"+未命中片段列表 | ✅ done |
+| ⑤ | `app/page.tsx` 拆组件 + 接入 usage/citations UI | `components/`：`types.ts`（共享类型+`SessionEvent.usage`+`CitationLookup`+`CITE_RE`+`SECTION_LABELS`+`LEARNERS`+`PACINGS`）· `Field.tsx` · `Modal.tsx` · `ChatView.tsx`（forwardRef，miss chip 红边+⚠️）· `CoachSidebar.tsx` · `HistoryDrawer.tsx` · `AuditPanel.tsx` · `Controls.tsx` · `useSession.ts`（整套会话逻辑抽成 hook）。`app/page.tsx` 已从 1538 行内联版重写为约 270 行，全部从组件引入，接入 `usage`/`citations` state + footer 显示 | ✅ done |
+| — | API 暴露 | `app/api/sessions/[sid]/route.ts` GET 加返回 `usage / usageSummary / citations` | ✅ done |
+
+`npx tsc --noEmit` 全程无输出通过（本会话用 `node_modules/.bin/tsc --noEmit --incremental false` 复核，exit 0）。
+
+### 落到候选清单里
+
+- [x] 候选 #1（verbatim 引用校验）→ ④
+- [x] 候选 #2（按 turnsSoFar 截 transcript）→ ②
+- [x] 候选 #3（成本累计 UI，含 footer）→ ①
+- [x] 已知粗糙 #8（audit 失败重试）→ ③
+- [x] 新增：`app/page.tsx` 拆组件 + usage/citations UI → ⑤
+- [ ] 候选 #4/#5/#6/#7 未动
+
+### 提交映射（2026-07-11）
+
+这批改动切成了 5 个 commit：
+
+1. `chore: gitignore 忽略 .claude/ 和 .omo/ 本地状态`
+2. `feat: 成本累计 + verbatim 引用校验 + audit 截断与失败重试`（① ② ③ ④ + `route.ts` 暴露）
+3. `refactor: app/page.tsx 从内联版拆成组件`（⑤：`components/`、`lib/sse.ts`、`app/page.tsx`）
+4. `chore: .env.example 补 LLM 价格变量`
+5. `docs: STATUS.md 更新到与工作区一致`（本次）
+
+### 待验证（尚未在本会话实跑，留给下个会话）
+
+- **短会话（3 轮）**：`data/sessions/<sid>/usage.jsonl` 每轮 4 条（teacher/learner/teacherCoach/learnerCoach）、`citations.jsonl` 有教师引用、footer 显示 token 与 ¥、ChatView miss chip 红边+⚠️。
+- **audit 回归**：对一个 `status=aborted` 的旧 session 跑 audit，确认教师素材不出现半截未完成轮次。
