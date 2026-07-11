@@ -1,9 +1,9 @@
 # STATUS.md · 项目当前状态与改进候选
 
 > **给未来的你或 AI 拿起来接着改用。**
-> 快照时间：2026-07-07（原文）+ 2026-07-11 增补一节"进行中的改进 (2026-07-11)"在文末
-> 最新 commit：`ff14e26`（chore: .env.example 补 LLM 价格变量）——本节的 2026-07-11 改动已全部提交。
-> **⚠️ 新会话打开先看文末"进行中的改进"那一节。**
+> 快照时间：2026-07-07（原文）+ 2026-07-11 增补两批改进在文末
+> 最新 commit：`cc90222`（docs: STATUS.md 更新到与工作区一致）——文末"第一批"已提交；**"第二批（审计双维度 / 继续对话 / 教师首句 / 批量矩阵 / 网页上传）"尚未提交，在工作区**。
+> **⚠️ 新会话打开先看文末"进行中的改进"两节。**
 
 ## 一句话现状
 
@@ -40,12 +40,29 @@
 - 教师侧上下文预算 60k / 学生侧 40k；单份摘要超 1.5k 会再压一次
 - 摘要复用 `audit` purpose 的模型（廉价）
 
-### 审计（跨会话合审）
-- `prompts/audit_rules.md` 明令：只审书本身，不评价教师、不评价学生
-- **5 段 `===TAG===` 协议**：VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS
-- 支持一次审多个 session（`POST /api/audits { sids: [] }`）—— UI 里勾选合审
+### 审计（跨会话合审 · 双维度）
+- **两个维度**（`POST /api/audits { sids, dimension }`）：
+  - `book`（默认，`prompts/audit_rules.md`）：审书本身，不评价 agent。5 段 `===TAG===`：VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS。VERDICT 判**问题层级**（局部可补 vs 结构性/体裁性需整体改造成蓝本）；CLARITY 每条标**三级严重度**🔴🟠🟡；SUGGESTIONS 分"局部修补 / 结构性改造"两组。
+  - `teacher`（`prompts/audit_teacher_rules.md`）：审教师教学质量、产出面向更新教师约束。5 段：VERDICT / METHOD / PERSONA_FIT / RULE_VIOLATIONS / RULE_SUGGESTIONS。
+- 支持一次审多个 session —— UI 里勾选合审；面板顶部切维度、列本书审计历史可回看（`GET /api/audits?bookSlug`）
 - 每一段的证据必须来自 transcript（用 `> ` 引用）
-- 落盘 `data/audits/<aid>/{meta.json, report.md}` + 全局 `data/audits/history.jsonl`
+- 首次输出 5 段 tag 不全会自动重跑一次（`hasAllTags` + `MAX_ATTEMPTS=2`）
+- 落盘 `data/audits/<aid>/{meta.json（含 dimension）, report.md}` + 全局 `data/audits/history.jsonl`（含 dimension）
+
+### 书的导入（网页上传 + 命令行）
+- **网页上传**（顶栏「上传书…」）：上传/粘贴整本 md，按 `## 导论 / 第X章 / 第X节` 自动切节，入库前实时预览切节结果；slug 撞车拒绝、不覆盖已有书。解析在 `lib/parse-book.ts`（纯函数、无 node 依赖，前端预览与后端 `POST /api/books` 落盘共用）
+- `scripts/import-mineru.mjs`：命令行版，把 MinerU 输出的 `full.md` 按同样边界切成 sections，删图片引用与营销广告
+- 目前入库：**example**（样例概率书 2 节）+ **makesi**（马原 10 节，约 11.5w 字）
+
+### 批量矩阵生成
+- 顶栏「批量·矩阵」开关：学生/节奏变多选，同一节 × 多画像 × 多节奏**串行**逐个跑（控成本、每个仍实时流进对话区），顶部进度条显示各组合状态（排队/运行/完成/出错）
+- 跑完自动把这批 sid 预勾选进审计选择器 → 直接送审得"单节多组合统一报告"
+- 「停止」中止当前会话并停整个队列；半截会话保留可续跑/可审
+- 全书级（多节 × 多画像 × 多节奏 → 分层 map-reduce 汇总）**未做**，矩阵展开逻辑已按可扩到多节设计
+
+### 教师首句强制 & 继续对话
+- **教师首句强制**：教师流式输出为空串（LLM 偶发，尤其首轮）最多重试 3 次；仍空就中止本轮报 `errored`，**绝不放行到学生侧**——杜绝"教师没说话学生抢答"
+- **继续对话**：footer「继续对话」按钮对已停止（aborted）/ 已到轮次（done）的会话再跑 N 轮；`runSession` 放开了对 done 的续跑限制（新轮数上限 > 已跑轮数即可）
 
 ### 进度保持
 - transcript.jsonl / coach.jsonl / learner_coach.jsonl **append-only**
@@ -53,11 +70,6 @@
 - **重启修复**：`reconcileOnStartup()` 把 `status=running` 的僵尸会话改成 `aborted`（首次调用 `/api/session` 时触发）
 - **续跑**：`POST /api/session { resumeSid }`——载入最后一次教练分析 + 从最后完整轮次接着跑；半截 teacher 消息（教师说完学生没接）会被丢弃
 - **载入到对话栏**：历史抽屉的"载入"按钮把 transcript + 教练全放回观察页（只读），之后可以点"审计…"
-
-### 书的导入
-- `scripts/import-mineru.mjs`：把 MinerU 输出的 `full.md` 按 `## 导论 / ## 第X章 / ## 第X节` 切成 sections
-- 删图片引用、删营销广告
-- 目前入库：**example**（样例概率书 2 节）+ **makesi**（马原 10 节，约 11.5w 字）
 
 ## 关键参数速查
 
@@ -79,38 +91,49 @@
 
 ```
 app/                              Next.js 15 app router
-  page.tsx                        观察页（Client, 约 270 行；逻辑抽到 components/useSession.ts，UI 拆到 components/*）
+  page.tsx                        观察页（Client；逻辑抽到 components/useSession.ts，UI 拆到 components/*）
   layout.tsx / globals.css
   api/
-    books/route.ts                GET 书列表 + 字数
+    books/route.ts                GET 书列表 + 字数 / POST 上传整本 md 自动切节入库
     books/[slug]/route.ts         GET 书详情 / ?section=<id>
     session/route.ts              POST 起会话 / resume, SSE
     sessions/route.ts             GET ?bookSlug=（可空）
-    sessions/[sid]/route.ts       GET meta + turns + 双教练历史
-    audits/route.ts               POST { sids: [] } SSE 审计
+    sessions/[sid]/route.ts       GET meta + turns + 双教练 + usage + citations
+    audits/route.ts               POST { sids, dimension } SSE 审计 / GET ?bookSlug 审计历史
     audits/[aid]/route.ts         GET 单次审计
 
 lib/
   llm.ts          唯一 callLLM(purpose, messages, opts)，purpose ∈ teacher/learner/audit/coach
-                  含 jsonMode（response_format=json_object）
+                  含 jsonMode + usage 回调（stream_options.include_usage）
+  pricing.ts      按 .env 价格把 token 用量换算人民币
   book.ts         Book/Section 读取 + 字数统计 + 分页缓存 getPages()
+  parse-book.ts   纯函数：整本 md 按节切分（前端预览 + 后端落盘共用，无 node 依赖）
+  import-book.ts  writeBook 落盘 + bookExists 占用检查
   pagination.ts   paginate / initialWindow / slideWindow / renderWindow
+  citations.ts    verbatim 引用逐字校验 + 命中率聚合
   teacher.ts      buildTeacherSystemPrompt（返回 { systemPrompt, window }）
   learner.ts      buildLearnerSystemPrompt
   coach.ts        analyzeWithCoach + analyzeLearnerWithCoach + render*Block
   session.ts      runSession（async generator, 产 SessionEvent）
-                  + maybeCompress + reconcileOnStartup + resume
-  audit.ts        collectMaterial 跨 sid 组织素材 + 单次 LLM 出报告 + parseReport
+                  + 教师首句强制 + maybeCompress + reconcileOnStartup + resume（含 done 续跑）
+  audit.ts        collectMaterial 跨 sid 组织素材 + 双维度出报告 + parseReport + listAuditHistory
   storage.ts      fs 小工具（原子写、追加行）
+  sse.ts          前端 readSse：逐帧 JSON.parse SSE
+
+components/       page.tsx 拆出的 UI + 状态 hook
+  useSession.ts（会话/批量/审计整套状态）· types.ts（共享类型）
+  Controls.tsx · ChatView.tsx · CoachSidebar.tsx · AuditPanel.tsx
+  HistoryDrawer.tsx · UploadBook.tsx · Modal.tsx · Field.tsx
 
 prompts/          （直接改这里就改了 LLM 行为，无需重启）
   teacher_rules.md
   learner_novice.md / _mid.md / _critic.md
   coach_rules.md            教师教练 JSON schema
   learner_coach_rules.md    学生教练 JSON schema
-  audit_rules.md            审计 5 段协议
+  audit_rules.md            审书维度（5 段 + 问题层级 + 三级严重度）
+  audit_teacher_rules.md    审教师教学质量维度（5 段）
 
-scripts/import-mineru.mjs   MinerU 输出 → sections/
+scripts/import-mineru.mjs   MinerU 输出 → sections/（网页上传是它的 UI 化）
 
 data/
   books/<slug>/manifest.json + sections/<id>.md
@@ -119,9 +142,11 @@ data/
     meta.json             （含 pacing / windowStartPage/endPage / teacherSummary / turnsSoFar）
     transcript.jsonl      append-only
     coach.jsonl / learner_coach.jsonl
+    usage.jsonl           每轮各 callLLM 的 token 用量与成本
+    citations.jsonl       教师每轮引用 verbatim 校验结果
   audits/<aid>/           （.gitignored）
-    meta.json + report.md
-  audits/history.jsonl    （.gitignored 全局索引）
+    meta.json（含 dimension）+ report.md
+  audits/history.jsonl    （.gitignored 全局索引，含 dimension）
 ```
 
 ## 已明确的技术约定
@@ -151,13 +176,13 @@ data/
 
 ## 下一步几个自然候选（按性价比排）
 
-1. **教师引用 verbatim 校验**——投入很小（后端一个 `includes()` + 一段 prompt 惩罚），收益直接：审计里 INCONSISTENCY 段可以自动填。
-2. **审计触发时按 `turnsSoFar` 截 transcript**——投入更小（audit.ts 一行修改），排除半截 teacher 污染。
-3. **成本累计 UI**——底部 footer 加一个"本次会话已用 xxk 输入 / xxk 输出 tokens"。所有 provider 的 usage 字段都能从 SDK 拿。
-4. **教练 v2 用投票 / 独立"内容进度教练"**——如果实测发现翻页决策不稳。
-5. **审计对比模式**——现在合审多个 session 是拼在一起。可以加"对比模式"：novice vs critic 学同一节，你想看的是"哪些点在两种学生下都卡"。审计 prompt 里加一段。
-6. **教师风格多样化**——目前只有一份 `teacher_rules.md`。可以加"耐心"/"严厉"/"跳跃"等档位，看不同风格教师暴露的书本问题会不会不同。
-7. **端到端跑通一本书**——现在的黄金路径都是"跑一节看一节"。真做审书的话，需要一个 batch runner：每节 × 每种学生画像 × 每种教学节奏 = N 场 session，跑完 N × 3 × 3 场再合审出一份**书级审计报告**（新的 audit rules，比现在的 5 段更长）。这是最大的下一跳。
+> 原候选 #1/#2/#3（verbatim 校验 / 按 turnsSoFar 截 / 成本 UI）已在第一批完成；审计对比 & 批量生成已在第二批部分完成。下面是**仍未做**的。
+
+1. **全书级 map-reduce 审计**（最大的下一跳）——批量矩阵生成已做，缺"汇总"：全书跨节时一次性全塞会爆上下文。做法：每节各出节级报告（现有 `runAudit` 对单节 sids 就是），再把**节级报告**（不是原始 transcript）喂一个"元审计"出全书统一改进意见。`runAudit` 加 `mode:"reduce"` 入口即可。
+2. **教练 v2 用投票 / 独立"内容进度教练"**——如果实测发现翻页决策不稳（现在只靠主教练搭车判 `contentProgress`）。
+3. **教师风格多样化**——目前只有一份 `teacher_rules.md`。可以加"耐心"/"严厉"/"跳跃"等档位，看不同风格教师暴露的书本问题会不会不同（批量矩阵已经能跑多画像 × 多节奏，风格是第三个轴）。
+4. **摘要 prompt 外置**——现在硬编码在 `session.ts`，想可调得改代码。挪进 `prompts/`。
+5. **把"问题层级 / 三级严重度"同步进造书流程文档**——`破卷适配教科书/HOW-TO-BUILD-AND-AUDIT.md` 目前只有三级严重度，没有"局部 vs 体裁性"这一层（本项目 audit_rules 已加）。
 
 ## 沟通与运行
 
@@ -177,7 +202,7 @@ data/
 
 ---
 
-## 2026-07-11 完成的改进 · 5 项全部完成并提交
+## 2026-07-11 完成的改进 · 第一批（5 项，已提交）
 
 针对上文"下一步候选"里的 #1/#2/#3 + 一项拆分。**已全部完成并提交**（见文末"提交映射"）。
 
@@ -217,3 +242,41 @@ data/
 
 - **短会话（3 轮）**：`data/sessions/<sid>/usage.jsonl` 每轮 4 条（teacher/learner/teacherCoach/learnerCoach）、`citations.jsonl` 有教师引用、footer 显示 token 与 ¥、ChatView miss chip 红边+⚠️。
 - **audit 回归**：对一个 `status=aborted` 的旧 session 跑 audit，确认教师素材不出现半截未完成轮次。
+
+---
+
+## 2026-07-11 完成的改进 · 第二批（审计双维度 / 继续对话 / 教师首句 / 批量矩阵 / 网页上传）
+
+> **⚠️ 尚未提交，全部在工作区。** `npx tsc --noEmit` 与 `npx next build` 均通过。
+
+| # | 内容 | 落点 | 状态 |
+|---|---|---|---|
+| A | **教师首句强制** | `lib/session.ts` 教师流加重试循环：空串最多重试 3 次，仍空 `throw`→`errored`，绝不放行到学生侧 | ✅ done |
+| B | **继续对话**（done 也可续跑）| `lib/session.ts` 放开 `done` 拒绝（新 maxTurns > turnsSoFar 即可续）；`useSession.ts` 加 `turnsSoFar` 跟踪 + `continueSession(extra)`；`start()` 加 `maxTurnsOverride`；`app/page.tsx` footer 加「继续对话」按钮 | ✅ done |
+| C | **审计双维度 + 历史** | 新建 `prompts/audit_teacher_rules.md`（教师教学质量，5 段 VERDICT/METHOD/PERSONA_FIT/RULE_VIOLATIONS/RULE_SUGGESTIONS）；`lib/audit.ts` 加 `AuditDimension`、`DIMENSION_TAGS/RULES_FILE`、`parseReport(raw, tags)` tag 通用化、`AuditReport` 改成 `sections: Record`、`listAuditHistory`；`AuditMeta`+`history.jsonl` 记 `dimension`；`app/api/audits/route.ts` POST 读 `dimension` + 新增 GET `?bookSlug` 历史；`AuditPanel.tsx` 维度切换 + 历史列表；`types.ts` 加 `AuditDimension/AuditHistoryItem` + 教师维度 SECTION_LABELS；`useSession.ts` 加 `auditDimension/auditHistory/viewAudit` | ✅ done |
+| C+ | **审书维度加问题层级 + 三级严重度** | `prompts/audit_rules.md`：加"局部可补 vs 结构性/体裁性"轴 + 🔴🟠🟡 三级；VERDICT 判层级、CLARITY 标级、SUGGESTIONS 分"局部修补/结构性改造"两组；松绑"不许加领域知识"（读结构不算）。INCONSISTENCY 段未动 | ✅ done |
+| D | **批量矩阵生成** | `useSession.ts` 加 `batchMode/selectedLearners/selectedPacings/batchRuns/batchRunning` + `runBatch()`（串行跑矩阵、完成预勾选审计）+ `toggleLearner/togglePacing`；`Controls.tsx` 批量开关 + 画像/节奏多选 + 「批量开始（N）」；`app/page.tsx` 批量进度面板 | ✅ done |
+| E | **网页上传书** | 新建 `lib/parse-book.ts`（纯解析、无 node 依赖）+ `lib/import-book.ts`（`writeBook`/`bookExists`，re-export 解析）；`app/api/books/route.ts` 加 POST（校验 slug、防覆盖、切节落盘）；新建 `components/UploadBook.tsx`（文件/粘贴 + 实时切节预览）；`Controls.tsx`「上传书…」按钮；`useSession.ts` `showUpload`+`refreshBooks`；`app/page.tsx` 挂 Modal | ✅ done |
+
+### 落到候选清单里
+
+- [x] 已知粗糙 #4/#5（审计对比）部分 → 批量矩阵 D + 审计双维度 C 让"同节多画像/多节奏合审"成为顺手动作
+- [x] 上一轮"下一步 #7 端到端跑通一本书"的**批量生成**这半 → D（reduce 汇总仍未做，见新候选 #1）
+- [ ] 新候选 #1（全书 map-reduce）/ #2（教练投票）/ #3（教师风格轴）/ #4（摘要外置）/ #5（造书文档同步）未动
+
+### 待提交
+
+第二批改动尚未 commit。建议切分：
+1. `feat: 审计双维度（书/教师）+ 审计历史 + 问题层级/三级严重度`（C / C+）
+2. `feat: 教师首句强制 + 继续对话（done 续跑）`（A / B）
+3. `feat: 批量矩阵生成（多画像×多节奏串行）`（D）
+4. `feat: 网页上传书（整本 md 自动切节）`（E）
+5. `docs: CLAUDE.md / STATUS.md 更新到第二批`（本次）
+
+### 待验证（尚未实跑）
+
+- **教师首句**：构造教师返回空的情况（难自然触发），确认重试 + 学生不抢答。
+- **继续对话**：跑满 6 轮的 done 会话点「继续对话」，确认接第 7 轮而非报错。
+- **批量矩阵**：3 画像 × 1 节奏跑完 3 个会话，进度条状态正确，跑完审计选择器已预勾选这 3 个。
+- **网页上传**：上传一本 `## 第X节` 结构的 md，预览切节数正确，导入后书列表出现且能跑；slug 撞车被拒。
+- **审计双维度**：同一批 sids 分别按 book / teacher 跑，各出对应 5 段；历史列表能回看、标注维度。
