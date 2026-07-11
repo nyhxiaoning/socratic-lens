@@ -10,13 +10,22 @@
 - **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
 - **教师教练 TAE**（§3.4）：每轮末尾后台跑一次 JSON 分析，注入下一轮教师 system prompt。默认开。
 - **学生教练**：结构镜像教师教练，判断学生"是不是真懂 / 有没有用预训练作弊 / 画像有没有漂"，注入下一轮学生 system prompt。默认开。
-- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。按 `===TAG===` 5 段协议出**对书本身的诊断**（VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS）。落盘到 `data/audits/<aid>/report.md`。
+- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。**两个维度**（`POST /api/audits { sids, dimension }`）：
+  - `book`（审书本身，默认）：5 段 `===TAG===` 协议 VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS。VERDICT 要判**问题层级**（局部可补 vs 结构性/体裁性需整体改造成蓝本），CLARITY 每条标**三级严重度**（🔴会教错 / 🟠误导 / 🟡瑕疵），SUGGESTIONS 分"局部修补 / 结构性改造"两组。规则 `prompts/audit_rules.md`。
+  - `teacher`（审教师教学质量，产出面向更新教师约束）：VERDICT / METHOD / PERSONA_FIT / RULE_VIOLATIONS / RULE_SUGGESTIONS。规则 `prompts/audit_teacher_rules.md`。
+  - 落盘 `data/audits/<aid>/report.md` + meta（含 `dimension`）；全局索引 `data/audits/history.jsonl`。UI 审计面板顶部切维度，并列出本书**审计历史**可回看。
 
 **长会话支持**：轮数最高 120。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
 
 **自适应翻页**（§5.4）：如果一节原文 > 12k 字符，会切成 ~2k 字符/页；教师初始只看头 3-4 页（约 8k 字符窗口）；每轮教练判断 `contentProgress`（first_half / second_half / done），连续 2 次非 first_half 就自动翻页（保留 2 页重叠 + 追加新页至预算，末页守恒）。`data/sessions/<sid>/meta.json` 里 `windowStartPage/endPage` 全程可 resume。
 
-**进度保持**：所有状态每轮末落盘（transcript.jsonl append-only、coach.jsonl / learner_coach.jsonl、meta.json）。软件重启：`/api/session` 首次调用时跑 `reconcileOnStartup()`，把状态残留为 `running` 的老会话改成 `aborted`。观察页"历史"抽屉可以列出所有会话、查看 transcript、对未完成的会话点"继续"从最后一个完整轮次续跑。
+**进度保持**：所有状态每轮末落盘（transcript.jsonl append-only、coach.jsonl / learner_coach.jsonl、meta.json）。软件重启：`/api/session` 首次调用时跑 `reconcileOnStartup()`，把状态残留为 `running` 的老会话改成 `aborted`。观察页"历史"抽屉可以列出所有会话、查看 transcript、对未完成的会话点"继续"从最后一个完整轮次续跑。观察页 footer 的**「继续对话」**按钮对已停止/已到轮次（done）的会话再跑 N 轮（done 会话只要新轮数上限 > 已跑轮数即可续）。
+
+**教师首句强制**：教师流式输出若为空串（LLM 偶发，尤其首轮），最多重试 3 次；仍空就中止本轮并报错 `status=errored`——**绝不放行到学生侧**，杜绝"教师没说话学生抢答"。
+
+**批量矩阵生成**：顶栏「批量·矩阵」开关。开启后学生/节奏变多选，同一节 × 多画像 × 多节奏**串行**逐个跑（每个仍实时流进对话区），顶部进度条显示各组合状态。跑完自动把这批 sid 预勾选进审计选择器，直接送审得"单节多组合统一报告"。扩到全书时再加分层 map-reduce（未做）。
+
+**网页上传书**：顶栏「上传书…」→ 上传/粘贴整本 md，按 `## 导论 / 第X章 / 第X节` 自动切节，入库前实时预览切节结果。解析逻辑在 `lib/parse-book.ts`（纯函数、无 node 依赖，前端预览与后端落盘共用）。slug 撞车拒绝、不覆盖已有书。
 
 两 agent **独立上下文**：教师视角里学生说的话是 `user`，学生视角里教师说的话是 `user`——参考 `REVERSE-ENGINEERING-REPORT.md` §3.1。
 
@@ -32,47 +41,59 @@
 
 ```
 app/
-  page.tsx                          观察页（Client Component）
+  page.tsx                          观察页（Client Component，逻辑抽到 components/useSession.ts）
   layout.tsx / globals.css
-  api/books/route.ts                GET 书列表（含总字数、每节字数）
+  api/books/route.ts                GET 书列表（含总字数、每节字数）/ POST 上传整本 md 自动切节入库
   api/books/[slug]/route.ts         GET 书详情 / GET ?section=<id> 取一节
-  api/session/route.ts              POST 起会话，SSE 返回事件流
+  api/session/route.ts              POST 起会话 / resume，SSE 返回事件流
   api/sessions/route.ts             GET ?bookSlug=xxx 列该书所有会话
-  api/sessions/[sid]/route.ts       GET 单条会话 meta + transcript
-  api/audits/route.ts               POST { sids: [] } 跨会话跑审计（SSE）
+  api/sessions/[sid]/route.ts       GET 单条会话 meta + transcript + 双教练 + usage + citations
+  api/audits/route.ts               POST { sids, dimension } 跨会话跑审计（SSE）/ GET ?bookSlug 审计历史
   api/audits/[aid]/route.ts         GET 单次审计的 meta + 报告
 
 lib/
-  llm.ts       唯一 callLLM(purpose, messages, opts) 入口（含 jsonMode）
+  llm.ts       唯一 callLLM(purpose, messages, opts) 入口（含 jsonMode + usage 回调）
+  pricing.ts   按 .env 价格把 token 用量换算人民币
   book.ts      Book/Section 读取 + 每节字数统计 + 分页缓存
+  parse-book.ts 纯函数：整本 md 按节切分（前端预览 + 后端落盘共用，无 node 依赖）
+  import-book.ts 落盘一本书（manifest + sections）+ slug 占用检查
   pagination.ts 分页与滑窗算法（Socratopia §5.4 xC 简版）
+  citations.ts verbatim 引用逐字校验 + 命中率聚合
   teacher.ts   教师 system prompt 组装（含 pacing + 教练分析注入 + 分页窗口）
   learner.ts   学生 system prompt 组装（含学生教练分析注入）
   coach.ts     教师教练 + 学生教练：analyze* / render*Block
-  session.ts   会话循环 + 滑动摘要 + 双教练并行 + 自适应翻页 + resume + reconcile
-  audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + ===TAG=== 解析 + 落盘
+  session.ts   会话循环 + 教师首句强制 + 滑动摘要 + 双教练并行 + 自适应翻页 + resume + reconcile
+  audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + 双维度 ===TAG=== 解析 + 落盘 + 审计历史
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
+  sse.ts       前端 readSse：逐帧 JSON.parse SSE 响应
+
+components/    page.tsx 拆出的 UI + useSession hook
+  useSession.ts（整套会话/批量/审计状态与副作用）· types.ts（共享类型）
+  Controls.tsx · ChatView.tsx · CoachSidebar.tsx · AuditPanel.tsx
+  HistoryDrawer.tsx · UploadBook.tsx · Modal.tsx · Field.tsx
 
 prompts/
   teacher_rules.md
   learner_novice.md / learner_mid.md / learner_critic.md
   coach_rules.md              教师教练 JSON schema
   learner_coach_rules.md      学生教练 JSON schema
-  audit_rules.md
+  audit_rules.md              审书维度（5 段 + 问题层级 + 三级严重度）
+  audit_teacher_rules.md      审教师教学质量维度（5 段）
 
 scripts/
-  import-mineru.mjs                 把 MinerU 输出的 full.md 按"节"切分导入
+  import-mineru.mjs                 把 MinerU 输出的 full.md 按"节"切分导入（命令行版，网页上传是它的 UI 化）
 
 data/
-  books/<slug>/manifest.json + sections/<id>.md
+  books/<slug>/manifest.json + sections/<id>.md（+ <id>.pages.json 分页缓存，.gitignored）
   sessions/<sid>/
-    meta.json                       (含 pacing / turnsSoFar / teacherSummary 等)
+    meta.json                       (含 pacing / turnsSoFar / windowStartPage-endPage / teacherSummary 等)
     transcript.jsonl                (一行一 turn, append-only)
-    coach.jsonl                     (教师教练每轮 JSON)
-    learner_coach.jsonl             (学生教练每轮 JSON)
+    coach.jsonl / learner_coach.jsonl（每轮教练 JSON）
+    usage.jsonl                     (每轮各 callLLM 的 token 用量与成本)
+    citations.jsonl                 (教师每轮引用的 verbatim 校验结果)
                                                              （data/sessions .gitignored）
   audits/<aid>/meta.json + report.md                         （.gitignored）
-  audits/history.jsonl                                       （.gitignored 全局审计索引）
+  audits/history.jsonl                                       （.gitignored 全局审计索引，含 dimension）
 ```
 
 只有 `data/books/example/` 提交入库，其它 slug 在 `.gitignore` 里。
@@ -84,30 +105,32 @@ data/
 3. **文件即记忆**（§10.1）：书、rules、画像都是 md 文件，system prompt 组装时整份读入。不引 RAG、不引向量库。
 4. **拼接式 prompt**：段落间用 `\n\n---\n\n` 分隔（§10.1）。教师 8 段，学生 5 段。
 5. **本节原文只喂教师**：学生看不到——学生的困惑就是这本书的困惑。这是"用 agent 审书"的核心。
-6. **引用协议 `〔§<id>｜前若干字〕`**：仅从 §3.1 里保留这一条结构化约束。V1 不做服务端 verbatim 校验，靠 prompt 铁律 + 人工审阅；V2 补 manifest 校验（§10.2）。
+6. **引用协议 `〔§<id>｜前若干字〕`**：仅从 §3.1 里保留这一条结构化约束。服务端做 verbatim 逐字校验（`lib/citations.ts`）：教师每轮引用比对本节原文，命中/未命中落 `citations.jsonl`，未命中在 ChatView 里红边 + ⚠️，命中率注入 audit 的 INCONSISTENCY 段。
 7. **transcript.jsonl 一行一 turn**：`{turn, actor, text, ts}`。V2 审计 agent 直接吃这个文件。
 
 ## 常用命令
 
 ```bash
 # 首次
-pnpm install                # 或 npm install
-cp .env.example .env.local  # 填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+npm install
+cp .env.example .env.local  # 填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（+ 可选 LLM_MODEL_<PURPOSE> 分模型 + 价格变量）
 
-# 开发
-pnpm dev                    # http://localhost:3000
+# 开发（不用 pnpm dev——pnpm 严格模式会因 sharp 的 build script 报错）
+npx next dev               # http://localhost:3000，端口被占自动跳 3001/3002…
 
 # 构建
-pnpm build && pnpm start
+npx next build && npx next start
 ```
 
 ## 加一本书
 
-**从 MinerU 输出导入**（PDF → markdown 已经被 MinerU 处理过）：
+**网页上传（最省事，推荐）**：观察页顶栏「上传书…」→ 选 `.md` 文件或粘贴整本 markdown → 填 slug（书名/作者选填）→ 看切节预览确认边界 → 导入。按 `## 导论 / 第X章 / 第X节` 切，slug 撞车会拒绝、不覆盖已有书。
+
+**从 MinerU 输出导入**（命令行，PDF → markdown 已被 MinerU 处理过）：
 ```bash
 node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 ```
-按 `## 导论` / `## 第X章` / `## 第X节` 边界切分成 sections，删掉图片引用和营销广告。
+按 `## 导论` / `## 第X章` / `## 第X节` 边界切分成 sections，删掉图片引用和营销广告。（网页上传就是这个脚本的 UI 化，切节逻辑同源于 `lib/parse-book.ts`。）
 
 **手动加书**：
 1. 在 `data/books/<你的-slug>/` 下建目录（`.gitignore` 默认只提交 `example` 和 `makesi`，其它 slug 在本地跑就好）
@@ -123,7 +146,7 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 
 ## V1 明确不做
 
-消息回滚 · 长期学生画像演化 · verbatim 引用校验 · 多用户 · PDF/EPUB 导入 · 教师改书。
+消息回滚 · 长期学生画像演化 · 多用户 · PDF/EPUB 直接导入（要先转 markdown）· 教师改书 · 全书级 map-reduce 审计（批量生成已做，reduce 汇总未做）。
 
 ## 沟通风格（沿用旧约定）
 
