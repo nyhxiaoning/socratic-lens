@@ -96,3 +96,38 @@ test("computeCoverage: total=0 时 coverageRate=0", () => {
   const cov = computeCoverage([]);
   assert.equal(cov.coverageRate, 0);
 });
+
+import { renderChecklistMd, renderReportMd } from "../fidelity";
+import type { Checklist, Coverage } from "../fidelity";
+
+test("renderReportMd: 含覆盖率摘要、三态图标、原题分组", () => {
+  const rows: Row[] = [
+    { checklistId: "kp1", category: "knowledgePoint", itemName: "there be", status: "landed", synthQuote: "There is", quoteUnverified: false },
+    { checklistId: "kp2", category: "knowledgePoint", itemName: "冠词", status: "dropped", note: "漏了" },
+    { checklistId: "ex1", category: "exercise", itemName: "填空题", status: "morphed", synthQuote: "假引用", quoteUnverified: true },
+  ];
+  const cov: Coverage = { total: 3, landed: 1, morphed: 1, dropped: 1, coverageRate: 0.33 };
+  const md = renderReportMd(rows, cov, "保真度一般");
+  assert.match(md, /覆盖率/);
+  assert.match(md, /1\/3/);            // landed/total
+  assert.match(md, /✅/);
+  assert.match(md, /❌/);
+  assert.match(md, /⚠️/);
+  assert.match(md, /教材原题/);         // exercise 单独分组标题
+  assert.match(md, /未在合成节逐字命中/); // quoteUnverified 警示
+  assert.match(md, /保真度一般/);        // verdict
+});
+
+test("renderChecklistMd: 四类都出小标题", () => {
+  const c: Checklist = {
+    knowledgePoints: [{ id: "kp1", name: "there be", sourceQuote: "There is a book" }],
+    assessmentCriteria: [{ id: "ac1", desc: "能描述存在", sourceQuote: "Describe" }],
+    exercises: [{ id: "ex1", question: "There ___ books", answer: "are", sourceQuote: "There ___ books" }],
+    errorSpots: [{ id: "es1", desc: "数不分", sourceQuote: "There is three" }],
+  };
+  const md = renderChecklistMd(c);
+  assert.match(md, /知识点/);
+  assert.match(md, /评价标准/);
+  assert.match(md, /教材原题/);
+  assert.match(md, /易错点/);
+});

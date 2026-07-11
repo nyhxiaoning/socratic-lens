@@ -150,3 +150,55 @@ export function computeCoverage(rows: Row[]): Coverage {
   const coverageRate = total === 0 ? 0 : Math.round((landed / total) * 100) / 100;
   return { total, landed, morphed, dropped, coverageRate };
 }
+
+const STATUS_ICON: Record<ReconStatus, string> = { landed: "✅", morphed: "⚠️", dropped: "❌" };
+const STATUS_LABEL: Record<ReconStatus, string> = { landed: "落地", morphed: "变形", dropped: "漏" };
+
+function renderRow(r: Row): string {
+  const icon = STATUS_ICON[r.status];
+  const parts = [`- ${icon} **${STATUS_LABEL[r.status]}**：${r.itemName}`];
+  if (r.synthQuote) {
+    const warn = r.quoteUnverified ? " ⚠️（此引用未在合成节逐字命中，可能是模型臆造）" : "";
+    parts.push(`\n  > 合成节：${r.synthQuote}${warn}`);
+  }
+  if (r.note) parts.push(`\n  说明：${r.note}`);
+  return parts.join("");
+}
+
+export function renderReportMd(rows: Row[], coverage: Coverage, verdict: string): string {
+  const nonExercise = rows.filter((r) => r.category !== "exercise");
+  const exercises = rows.filter((r) => r.category === "exercise");
+  const lines: string[] = [];
+  lines.push(`# Fidelity 审计报告`);
+  lines.push(``);
+  lines.push(`## 总评`);
+  lines.push(verdict || "（无）");
+  lines.push(``);
+  lines.push(`## 覆盖率`);
+  lines.push(
+    `落地 ${coverage.landed}/${coverage.total}（${Math.round(coverage.coverageRate * 100)}%）` +
+      ` · 变形 ${coverage.morphed} · 漏 ${coverage.dropped}`,
+  );
+  lines.push(``);
+  lines.push(`## 知识点 / 评价标准 / 易错点 勾稽`);
+  lines.push(nonExercise.length ? nonExercise.map(renderRow).join("\n") : "- 无");
+  lines.push(``);
+  lines.push(`## 教材原题勾稽`);
+  lines.push(exercises.length ? exercises.map(renderRow).join("\n") : "- 无");
+  lines.push(``);
+  return lines.join("\n");
+}
+
+export function renderChecklistMd(c: Checklist): string {
+  const lines: string[] = [`# 源材料结构化清单`, ``];
+  lines.push(`## 知识点`);
+  lines.push(c.knowledgePoints.length ? c.knowledgePoints.map((k) => `- **${k.name}**（${k.id}）\n  > ${k.sourceQuote}${k.note ? `\n  ${k.note}` : ""}`).join("\n") : "- 无");
+  lines.push(``, `## 评价标准`);
+  lines.push(c.assessmentCriteria.length ? c.assessmentCriteria.map((a) => `- ${a.desc}（${a.id}）\n  > ${a.sourceQuote}`).join("\n") : "- 无");
+  lines.push(``, `## 教材原题`);
+  lines.push(c.exercises.length ? c.exercises.map((e) => `- ${e.question}（${e.id}）\n  答案：${e.answer}\n  > ${e.sourceQuote}`).join("\n") : "- 无");
+  lines.push(``, `## 易错点`);
+  lines.push(c.errorSpots.length ? c.errorSpots.map((s) => `- ${s.desc}（${s.id}）\n  > ${s.sourceQuote}`).join("\n") : "- 无");
+  lines.push(``);
+  return lines.join("\n");
+}
