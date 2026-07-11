@@ -17,6 +17,7 @@ import {
 } from "./storage";
 import { runFidelity, computeCoverage, FIDELITY_ROOT } from "./fidelity";
 import { reconcileAgainstTranscript, renderCoverageReportMd, deriveCoverageVerdict } from "./coverage";
+import { getChecklist } from "./checklist";
 
 /** 审计维度：审书本身、审教师教学质量、Fidelity 保真度审计、教学覆盖度审计。 */
 export type AuditDimension = "book" | "teacher" | "fidelity" | "coverage";
@@ -481,11 +482,15 @@ export async function* runCoverageAudit(
       sourceLabel = `书本原文「${book.title}」§${sm.sectionId} ${sectionTitle}（AI 从节中推断，非外部源材料）`;
     }
 
-    yield { type: "audit_chunk", text: `正在提取「${sectionTitle}」的教学清单……\n\n` };
-
-    // 1. 提取清单
-    const { extractChecklist } = await import("./fidelity");
-    const checklist = await extractChecklist(sourceText, signal);
+    // 1. 提取清单（优先读缓存，没有再在线提取）
+    let checklist = await getChecklist(sm.bookSlug, sm.sectionId);
+    if (checklist) {
+      yield { type: "audit_chunk", text: `  使用已缓存的知识点清单。\n\n` };
+    } else {
+      yield { type: "audit_chunk", text: `  正在在线提取「${sectionTitle}」的知识点清单（未缓存）……\n\n` };
+      const { extractChecklist } = await import("./fidelity");
+      checklist = await extractChecklist(sourceText, signal);
+    }
     const totalItems =
       checklist.knowledgePoints.length +
       checklist.assessmentCriteria.length +

@@ -21,6 +21,9 @@ export function AuditPicker({
   onViewHistory,
   onCancel,
   onSubmit,
+  checklistStatus,
+  generatingSections,
+  onGenerateChecklist,
 }: {
   book: BookSummary | undefined;
   currentSid: string;
@@ -33,6 +36,9 @@ export function AuditPicker({
   onViewHistory: (aid: string) => void;
   onCancel: () => void;
   onSubmit: (sampleName?: string) => void;
+  checklistStatus?: Record<string, { exists: boolean; itemCount?: number }>;
+  generatingSections?: Set<string>;
+  onGenerateChecklist?: (sectionId: string) => void;
 }) {
   const grouped = useMemo(() => {
     const map = new Map<string, SessionListItem[]>();
@@ -103,6 +109,21 @@ export function AuditPicker({
             style={{ fontSize: 12 }}
           >
             {d.label}
+            {d.id === "fidelity" && (
+              <span
+                style={{
+                  fontSize: 9,
+                  color: "var(--muted)",
+                  border: "1px solid var(--muted)",
+                  borderRadius: 3,
+                  padding: "0 4px",
+                  marginLeft: 4,
+                  verticalAlign: "top",
+                }}
+              >
+                实验性
+              </span>
+            )}
           </button>
         ))}
         <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
@@ -198,10 +219,29 @@ export function AuditPicker({
               .map((secId) => {
                 const list = grouped.get(secId)!;
                 const secTitle = book?.sections.find((s) => s.id === secId)?.title ?? secId;
+                const cs = checklistStatus?.[secId];
+                const isGenerating = generatingSections?.has(secId);
                 return (
                   <div key={secId} style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                      §{secId} {secTitle}
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span>§{secId} {secTitle}</span>
+                      <span style={{ fontSize: 11 }}>
+                        {cs?.exists ? (
+                          <span style={{ color: "var(--accent)" }}>✅ {cs.itemCount ?? "?"} 条</span>
+                        ) : (
+                          <span style={{ color: "var(--muted)" }}>未生成</span>
+                        )}
+                      </span>
+                      {onGenerateChecklist && (
+                        <button
+                          onClick={() => onGenerateChecklist(secId)}
+                          disabled={isGenerating || cs?.exists}
+                          title={cs?.exists ? "已缓存，无需重新生成" : "从书本原文提取知识点清单"}
+                          style={{ fontSize: 10, padding: "1px 6px", cursor: cs?.exists ? "not-allowed" : "pointer" }}
+                        >
+                          {isGenerating ? "生成中…" : cs?.exists ? "已缓存" : "生成知识点清单"}
+                        </button>
+                      )}
                     </div>
                     {list.map((s) => (
                       <label

@@ -80,6 +80,10 @@ export function useSession() {
   const [auditDimension, setAuditDimension] = useState<AuditDimension>("book");
   const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
 
+  // 知识点清单缓存
+  const [checklistStatus, setChecklistStatus] = useState<Record<string, { exists: boolean; itemCount?: number }>>({});
+  const [generatingSections, setGeneratingSections] = useState<Set<string>>(new Set());
+
   const abortRef = useRef<AbortController | null>(null);
   const auditAbortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -425,14 +429,21 @@ export function useSession() {
     setPickedSids(sid ? new Set([sid]) : new Set());
     if (!bookSlug) return;
     try {
-      const [sr, hr] = await Promise.all([
+      const [sr, hr, cr] = await Promise.all([
         fetch(`/api/sessions?bookSlug=${encodeURIComponent(bookSlug)}`),
         fetch(`/api/audits?bookSlug=${encodeURIComponent(bookSlug)}`),
+        fetch(`/api/checklists?bookSlug=${encodeURIComponent(bookSlug)}`),
       ]);
       const sd = await sr.json();
       setExistingSessions(sd.sessions || []);
       const hd = await hr.json();
       setAuditHistory(hd.audits || []);
+      const cd = await cr.json();
+      const status: Record<string, { exists: boolean; itemCount?: number }> = {};
+      for (const item of cd.checklists || []) {
+        status[item.sectionId] = { exists: item.exists, itemCount: item.itemCount };
+      }
+      setChecklistStatus(status);
     } catch (e) {
       setError(String(e));
     }
@@ -445,6 +456,33 @@ export function useSession() {
       else copy.add(s);
       return copy;
     });
+  }
+
+  async function generateChecklist(sectionId: string) {
+    if (!bookSlug) return;
+    setGeneratingSections((prev) => new Set(prev).add(sectionId));
+    setError("");
+    try {
+      const r = await fetch("/api/checklists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bookSlug, sectionId }),
+      });
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      const d = await r.json();
+      setChecklistStatus((prev) => ({
+        ...prev,
+        [sectionId]: { exists: true, itemCount: d.itemCount },
+      }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setGeneratingSections((prev) => {
+        const copy = new Set(prev);
+        copy.delete(sectionId);
+        return copy;
+      });
+    }
   }
 
   async function runAudit(sids: string[], dimension: AuditDimension = auditDimension, sampleName?: string) {
@@ -556,6 +594,8 @@ export function useSession() {
     auditText, auditing, showAuditPanel, setShowAuditPanel, existingSessions,
     pickedSids, togglePick, auditRef,
     auditDimension, setAuditDimension, auditHistory, viewAudit,
+    // 知识点清单缓存
+    checklistStatus, generatingSections, generateChecklist,
     // 历史 / 弹窗
     showHistory, setShowHistory, historyItems, modalSection, setModalSection,
     showUpload, setShowUpload, refreshBooks,
