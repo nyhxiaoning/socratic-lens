@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 import { getBook, getSection, getSectionTitle } from "./book";
 import { aggregateCitations, type Citation } from "./citations";
 import { callLLM, type LLMMessage } from "./llm";
@@ -14,19 +15,23 @@ import {
   SESSIONS_ROOT,
   writeAtomic,
 } from "./storage";
+import { runFidelity, FIDELITY_ROOT } from "./fidelity";
 
-/** 审计维度：审书本身，还是审教师教学质量。 */
-export type AuditDimension = "book" | "teacher";
+/** 审计维度：审书本身、审教师教学质量、Fidelity 保真度审计。 */
+export type AuditDimension = "book" | "teacher" | "fidelity";
 
-/** 每个维度的 tag 集合（顺序即报告顺序，END 是终止符不入报告）。 */
+/** 每个维度的 tag 集合（顺序即报告顺序，END 是终止符不入报告）。
+ *  fidelity 维度不用 ===TAG===，其 report.md 是纯 markdown，tags 为空。 */
 const DIMENSION_TAGS: Record<AuditDimension, string[]> = {
   book: ["VERDICT", "CLARITY", "HARD_SPOTS", "INCONSISTENCY", "SUGGESTIONS"],
   teacher: ["VERDICT", "METHOD", "PERSONA_FIT", "RULE_VIOLATIONS", "RULE_SUGGESTIONS"],
+  fidelity: [],
 };
 
 const DIMENSION_RULES_FILE: Record<AuditDimension, string> = {
   book: "audit_rules.md",
   teacher: "audit_teacher_rules.md",
+  fidelity: "",
 };
 
 /** 已解析的审计报告：tag → 段落文本（外加 raw）。 */
@@ -41,6 +46,7 @@ export type AuditMeta = {
   dimension: AuditDimension;
   sids: string[];
   sectionIds: string[];
+  sampleName?: string; // fidelity 维度用，标记被审的样本名
   startedAt: number;
   endedAt?: number;
   status: "running" | "done" | "errored";
@@ -334,10 +340,95 @@ function hasAllTags(raw: string, tags: string[]): boolean {
 }
 
 export type AuditEvent =
-  | { type: "audit_start"; aid: string; dimension: AuditDimension; sids: string[]; sectionIds: string[] }
+  | { type: "audit_start"; aid: string; dimension: AuditDimension; sids?: string[]; sectionIds?: string[]; sampleName?: string }
   | { type: "audit_chunk"; text: string }
   | { type: "audit_done"; aid: string; report: AuditReport }
   | { type: "audit_error"; message: string };
+
+/**
+ * Fidelity 保真度审计（不依赖 sessions，读 samples/{name}/{source.md, synth.md}）。
+ * 复用 lib/fidelity.ts 的 runFidelity，产物落 data/audits/<aid>/。
+ */
+export async function* runFidelityAudit(
+  sampleName: string,
+  signal: AbortSignal,
+): AsyncGenerator<AuditEvent> {
+  const aid = newAid();
+  const meta: AuditMeta = {
+    aid,
+    bookSlug: "",
+    dimension: "fidelity",
+    sids: [],
+    sectionIds: [],
+    sampleName,
+    startedAt: Date.now(),
+    status: "running",
+  };
+
+  try {
+    await ensureDir(auditDir(aid));
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
+    yield { type: "audit_start", aid, dimension: "fidelity", sampleName };
+
+    // 读 sample 文件
+    const sampleDir = path.join(FIDELITY_ROOT, "..", "fidelity-samples", sampleName);
+    const sourcePath = path.join(sampleDir, "source.md");
+    const synthPath = path.join(sampleDir, "synth.md");
+    const sourceText = await fs.readFile(sourcePath, "utf-8");
+    const synthText = await fs.readFile(synthPath, "utf-8");
+
+    yield { type: "audit_chunk", text: `正在 Fidelity 审计「${sampleName}」：源材料 ${sourceText.length} 字、合成节 ${synthText.length} 字……\n\n` };
+
+    const result = await runFidelity(sourceText, synthText, signal, { sampleName });
+    const c = result.coverage;
+
+    const summary = `✅ 审计完成\n覆盖率：落地 ${c.landed}/${c.total}（${Math.round(c.coverageRate * 100)}%）· 变形 ${c.morphed} · 漏 ${c.dropped}\n总评：${result.verdict}\n\n`;
+    yield { type: "audit_chunk", text: summary };
+
+    // 读 report.md
+    const reportRaw = await fs.readFile(path.join(result.dir, "report.md"), "utf-8");
+    await ensureDir(auditDir(aid));
+
+    // 复制产物到 audit 目录（软链或复制）
+    const dstReport = path.join(auditDir(aid), "report.md");
+    // 先复制 fidelity 产物到 audit 目录，以便 audit history 统一管理
+    const fidChecklist = await fs.readFile(path.join(result.dir, "checklist.json"), "utf-8");
+    await writeAtomic(path.join(auditDir(aid), "report.md"), reportRaw);
+    await writeAtomic(path.join(auditDir(aid), "checklist.json"), fidChecklist);
+    await writeAtomic(path.join(auditDir(aid), "report.json"), JSON.stringify({
+      rows: result.rows,
+      coverage: result.coverage,
+      verdict: result.verdict,
+    }, null, 2));
+
+    meta.status = "done";
+    meta.endedAt = Date.now();
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
+
+    // 进审计历史
+    await appendLine(
+      path.join(AUDITS_ROOT, "history.jsonl"),
+      JSON.stringify({
+        aid,
+        bookSlug: "",
+        dimension: "fidelity",
+        sectionIds: [],
+        sidCount: 0,
+        verdict: result.verdict,
+        ts: Date.now(),
+      }),
+    );
+
+    yield { type: "audit_done", aid, report: { sections: {}, raw: reportRaw } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    meta.status = "errored";
+    meta.endedAt = Date.now();
+    meta.error = message;
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2)).catch(() => {});
+    yield { type: "audit_error", message };
+  }
+}
 
 /**
  * 跨 sids 跑审计，落盘到 data/audits/<aid>/。

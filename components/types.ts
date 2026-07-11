@@ -120,7 +120,7 @@ export type SessionEvent =
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
-export type AuditDimension = "book" | "teacher";
+export type AuditDimension = "book" | "teacher" | "fidelity";
 
 export type AuditHistoryItem = {
   aid: string;
@@ -133,7 +133,7 @@ export type AuditHistoryItem = {
 };
 
 export type AuditEvent =
-  | { type: "audit_start"; aid: string; dimension?: AuditDimension; sids: string[]; sectionIds: string[] }
+  | { type: "audit_start"; aid: string; dimension?: AuditDimension; sids?: string[]; sectionIds?: string[]; sampleName?: string }
   | { type: "audit_chunk"; text: string }
   | { type: "audit_done"; aid: string; report: { raw: string } }
   | { type: "audit_error"; message: string };
@@ -152,9 +152,15 @@ export const SECTION_LABELS: Record<string, string> = {
   PERSONA_FIT: "画像/节奏适配",
   RULE_VIOLATIONS: "违反铁律（关键）",
   RULE_SUGGESTIONS: "对教师约束的修改建议",
+  // Fidelity 保真度维度
+  VERDICT_FIDELITY: "总评",
+  COVERAGE: "覆盖率",
+  KNOWLEDGE_CHECK: "知识点 / 评价标准 / 易错点 勾稽",
+  EXERCISE_CHECK: "教材原题勾稽",
 };
 
 export const AUDIT_DIMENSIONS: { id: AuditDimension; label: string; desc: string }[] = [
   { id: "book", label: "书质量", desc: "审这本书讲得清不清，产出面向更新造书流程" },
   { id: "teacher", label: "教师教学质量", desc: "审教师照约束教得对不对，产出面向更新教师约束" },
+  { id: "fidelity", label: "保真度", desc: "审合成节有没有丢/歪源材料的教学目标、知识点、原题" },
 ];
