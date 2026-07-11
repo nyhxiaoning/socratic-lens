@@ -1,5 +1,6 @@
 import path from "node:path";
 import { getBook, getSection, getSectionTitle } from "./book";
+import { aggregateCitations, type Citation } from "./citations";
 import { callLLM, type LLMMessage } from "./llm";
 import type { SessionMeta, Turn } from "./session";
 import {
@@ -54,11 +55,11 @@ function newAid(): string {
   return `a-${ts}-${rand}`;
 }
 
-async function loadTurns(sid: string): Promise<Turn[]> {
+async function loadTurns(sid: string, turnsSoFar?: number): Promise<Turn[]> {
   const p = sessionTranscriptPath(sid);
   if (!(await exists(p))) return [];
   const raw = await readText(p);
-  return raw
+  const all = raw
     .split("\n")
     .filter(Boolean)
     .map((line) => {
@@ -69,6 +70,28 @@ async function loadTurns(sid: string): Promise<Turn[]> {
       }
     })
     .filter((t): t is Turn => t !== null);
+
+  if (turnsSoFar === undefined) return all;
+
+  // 只保留 turn <= turnsSoFar 且成对出现（teacher + learner 都在）
+  // append-only 时 resume 会留下半截 teacher（没有配对 learner）→ 排除
+  const byTurn = new Map<number, { teacher?: Turn; learner?: Turn }>();
+  for (const t of all) {
+    if (t.turn > turnsSoFar) continue;
+    const slot = byTurn.get(t.turn) ?? {};
+    if (t.actor === "teacher") slot.teacher = t;
+    else slot.learner = t;
+    byTurn.set(t.turn, slot);
+  }
+  const out: Turn[] = [];
+  for (let i = 1; i <= turnsSoFar; i++) {
+    const slot = byTurn.get(i);
+    if (slot?.teacher && slot?.learner) {
+      out.push(slot.teacher, slot.learner);
+    }
+    // 缺任何一半的轮次整轮丢——审计不用看半截
+  }
+  return out;
 }
 
 function formatTranscript(turns: Turn[]): string {
@@ -91,8 +114,32 @@ type SectionMaterial = {
   sectionId: string;
   sectionTitle: string;
   sectionText: string;
-  sessions: { sid: string; learnerId: string; turns: Turn[] }[];
+  sessions: {
+    sid: string;
+    learnerId: string;
+    turns: Turn[];
+    citationRecords: { turn: number; cites: Citation[] }[];
+  }[];
 };
+
+async function loadCitations(
+  sid: string,
+): Promise<{ turn: number; cites: Citation[] }[]> {
+  const p = path.join(SESSIONS_ROOT, sid, "citations.jsonl");
+  if (!(await exists(p))) return [];
+  const raw = await readText(p);
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line) as { turn: number; cites: Citation[] };
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is { turn: number; cites: Citation[] } => x !== null);
+}
 
 async function collectMaterial(sids: string[]): Promise<{
   bookSlug: string;
@@ -135,9 +182,20 @@ async function collectMaterial(sids: string[]): Promise<{
       };
       bySection.set(m.sectionId, mat);
     }
-    const turns = await loadTurns(m.sid);
+    const turns = await loadTurns(m.sid, m.turnsSoFar);
     if (turns.length === 0) continue; // 空 transcript 跳过
-    mat.sessions.push({ sid: m.sid, learnerId: m.learnerId, turns });
+    const citationRecords = await loadCitations(m.sid);
+    // 只保留 turn <= turnsSoFar 的引用记录（对齐 loadTurns 的截断）
+    const filteredCites =
+      m.turnsSoFar !== undefined
+        ? citationRecords.filter((r) => r.turn <= m.turnsSoFar)
+        : citationRecords;
+    mat.sessions.push({
+      sid: m.sid,
+      learnerId: m.learnerId,
+      turns,
+      citationRecords: filteredCites,
+    });
   }
 
   // 按书里的 section 顺序排
@@ -195,6 +253,29 @@ async function buildAuditMessages(sids: string[]): Promise<{
       parts.push(
         `### 会话 ${sess.sid}（学生画像：${LEARNER_LABEL[sess.learnerId] ?? sess.learnerId}）`,
       );
+
+      // 引用命中率块：INCONSISTENCY 段落的数据基础
+      const stats = aggregateCitations(sess.citationRecords);
+      if (stats.total > 0) {
+        const misses = sess.citationRecords
+          .flatMap((r) => r.cites.map((c) => ({ turn: r.turn, ...c })))
+          .filter((c) => !c.hit)
+          .slice(0, 8); // 最多列 8 个避免 prompt 过长
+        parts.push(
+          `**教师引用 verbatim 校验**：${stats.hit}/${stats.total} 命中${stats.miss > 0 ? "，" + stats.miss + " 未命中" : ""}。`,
+        );
+        if (misses.length > 0) {
+          parts.push(``);
+          parts.push(`未命中的引用（教师说的片段**不在**本节原文里逐字出现——INCONSISTENCY 段应重点核查）：`);
+          for (const c of misses) {
+            parts.push(
+              `- 第 ${c.turn} 轮：〔§${c.sectionId}｜${c.snippet}〕${c.sectionId !== sec.sectionId ? "（跨节引用，铁律不允许）" : ""}`,
+            );
+          }
+        }
+        parts.push(``);
+      }
+
       parts.push(formatTranscript(sess.turns));
       parts.push(``);
     }
@@ -238,6 +319,18 @@ function parseReport(raw: string): AuditReport {
   };
 }
 
+/** 5 段都非空才算完整（tag 存在且下面有点内容）。 */
+function hasAllTags(raw: string): boolean {
+  const report = parseReport(raw);
+  return Boolean(
+    report.verdict.length > 0 &&
+      report.clarity.length > 0 &&
+      report.hardSpots.length > 0 &&
+      report.inconsistency.length > 0 &&
+      report.suggestions.length > 0,
+  );
+}
+
 export type AuditEvent =
   | { type: "audit_start"; aid: string; sids: string[]; sectionIds: string[] }
   | { type: "audit_chunk"; text: string }
@@ -272,15 +365,30 @@ export async function* runAudit(
 
     yield { type: "audit_start", aid, sids, sectionIds };
 
+    // 最多 2 次尝试：第 1 次输出不完整（缺 tag）就把已流出的清掉，再跑一遍。
+    // 参考 Socratopia：下课解析失败重试一次。
     let raw = "";
-    for await (const chunk of callLLM("audit", messages, {
-      stream: true,
-      temperature: 0.3,
-      maxTokens: 4000,
-      signal,
-    })) {
-      raw += chunk;
-      yield { type: "audit_chunk", text: chunk };
+    let attempt = 0;
+    const MAX_ATTEMPTS = 2;
+    while (attempt < MAX_ATTEMPTS) {
+      attempt++;
+      raw = "";
+      // 第 2 次开始给前端一个"重试"信号（视觉上是"…重来了一段"）
+      if (attempt > 1) {
+        yield { type: "audit_chunk", text: "\n\n[审计首次输出不完整，正在重跑]\n\n" };
+      }
+      for await (const chunk of callLLM("audit", messages, {
+        stream: true,
+        temperature: 0.3,
+        maxTokens: 4000,
+        signal,
+      })) {
+        raw += chunk;
+        yield { type: "audit_chunk", text: chunk };
+      }
+      if (hasAllTags(raw)) break;
+      // 若被 abort 就别再尝试
+      if (signal.aborted) break;
     }
 
     const report = parseReport(raw);

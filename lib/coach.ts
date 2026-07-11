@@ -1,5 +1,5 @@
 import path from "node:path";
-import { callLLM, type LLMMessage, type Purpose } from "./llm";
+import { callLLM, type LLMMessage, type LLMUsage, type Purpose } from "./llm";
 import { PROMPTS_ROOT, readText } from "./storage";
 import type { Turn } from "./session";
 
@@ -100,6 +100,7 @@ export async function analyzeWithCoach(opts: {
   pacing: "thorough" | "normal" | "express";
   turns: Turn[];
   signal?: AbortSignal;
+  onUsage?: (u: LLMUsage) => void;
 }): Promise<CoachAnalysis | null> {
   const recent = opts.turns.slice(-RECENT_TURNS_FOR_COACH);
   if (recent.length === 0) return null;
@@ -137,6 +138,7 @@ export async function analyzeWithCoach(opts: {
       maxTokens: 1200,
       jsonMode: true,
       signal: opts.signal,
+      onUsage: opts.onUsage,
     });
     const cleaned = stripFences(raw);
     const parsed = JSON.parse(cleaned) as CoachAnalysis;
@@ -206,6 +208,7 @@ export async function analyzeLearnerWithCoach(opts: {
   pacing: "thorough" | "normal" | "express";
   turns: Turn[];
   signal?: AbortSignal;
+  onUsage?: (u: LLMUsage) => void;
 }): Promise<LearnerCoachAnalysis | null> {
   const recent = opts.turns.slice(-RECENT_TURNS_FOR_COACH);
   if (recent.length === 0) return null;
@@ -243,6 +246,7 @@ export async function analyzeLearnerWithCoach(opts: {
       maxTokens: 1200,
       jsonMode: true,
       signal: opts.signal,
+      onUsage: opts.onUsage,
     });
     const cleaned = stripFences(raw);
     const parsed = JSON.parse(cleaned) as LearnerCoachAnalysis;

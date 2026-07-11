@@ -1,12 +1,14 @@
 import path from "node:path";
-import { getBook, getPages, getSectionTitle } from "./book";
+import { getBook, getPages, getSection, getSectionTitle } from "./book";
 import {
   analyzeLearnerWithCoach,
   analyzeWithCoach,
   type CoachAnalysis,
   type LearnerCoachAnalysis,
 } from "./coach";
-import { callLLM } from "./llm";
+import { callLLM, type LLMUsage, type Purpose } from "./llm";
+import { verifyTurnCitations, type Citation } from "./citations";
+import { estimateCost } from "./pricing";
 import {
   buildLearnerMessages,
   buildLearnerSystemPrompt,
@@ -70,8 +72,26 @@ export type SessionEvent =
       endPage: number;
       totalPages: number;
     }
+  | {
+      type: "usage";
+      /** 累计到此刻 */
+      promptTokens: number;
+      completionTokens: number;
+      costCny: number;
+    }
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
+
+/** 一条 usage 记录，落盘到 data/sessions/<sid>/usage.jsonl */
+export type UsageRecord = {
+  ts: number;
+  turn: number;
+  purpose: Purpose;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costCny: number;
+};
 
 // ============================================================================
 // 滑动摘要参数（参考 Socratopia §10.2 精神，字符尺度非 token）
@@ -211,6 +231,7 @@ async function summarize(
   toSummarize: Turn[],
   prevSummary: string | undefined,
   signal: AbortSignal,
+  onUsage?: (u: LLMUsage) => void,
 ): Promise<string | null> {
   const transcript = toSummarize
     .map((t) => (t.actor === "teacher" ? "【教师】" : "【学生】") + t.text)
@@ -232,6 +253,7 @@ async function summarize(
         temperature: 0.2,
         maxTokens: 800,
         signal,
+        onUsage,
       },
     );
     let s = raw.trim();
@@ -243,7 +265,7 @@ async function summarize(
           { role: "system", content: system },
           { role: "user", content: SUMMARY_RECOMPRESS_PROMPT + s },
         ],
-        { stream: false, temperature: 0.2, maxTokens: 700, signal },
+        { stream: false, temperature: 0.2, maxTokens: 700, signal, onUsage },
       );
       s = raw2.trim();
     }
@@ -270,6 +292,7 @@ async function maybeCompress(
   prevSummary: string | undefined,
   prevUpto: number | undefined,
   signal: AbortSignal,
+  onUsage?: (u: LLMUsage) => void,
 ): Promise<{ summary: string; upto: number } | null> {
   const startFromTurn = prevUpto ?? 0;
   const pending = turns.filter((t) => t.turn > startFromTurn);
@@ -282,7 +305,7 @@ async function maybeCompress(
   const toSummarize = pending.slice(0, pending.length - keepFromEnd);
   const upto = toSummarize[toSummarize.length - 1].turn;
 
-  const summary = await summarize(side, toSummarize, prevSummary, signal);
+  const summary = await summarize(side, toSummarize, prevSummary, signal, onUsage);
   if (!summary) return null;
   return { summary, upto };
 }
@@ -402,6 +425,55 @@ export async function* runSession(
     const PROGRESS_WINDOW = 4;
     const PROGRESS_TRIGGER = 2;
 
+    // ---- usage 累计（本次 session）----
+    let cumPromptTokens = 0;
+    let cumCompletionTokens = 0;
+    let cumCostCny = 0;
+    // 存到闭包里的"待推送 usage 事件"——每轮末尾一次性 yield，避免频繁 SSE
+    let usageDirty = false;
+    const recordUsage = (purpose: Purpose, turn: number) => (u: LLMUsage) => {
+      const cost = estimateCost(purpose, u.promptTokens, u.completionTokens);
+      cumPromptTokens += u.promptTokens;
+      cumCompletionTokens += u.completionTokens;
+      cumCostCny += cost;
+      usageDirty = true;
+      // 落盘：append 到 usage.jsonl
+      const rec: UsageRecord = {
+        ts: Date.now(),
+        turn,
+        purpose,
+        promptTokens: u.promptTokens,
+        completionTokens: u.completionTokens,
+        totalTokens: u.totalTokens,
+        costCny: cost,
+      };
+      // 不 await——不阻塞流；出错只 console
+      appendLine(path.join(sessionDir(meta.sid), "usage.jsonl"), JSON.stringify(rec)).catch(
+        (e) => console.log(JSON.stringify({ tag: "usage_write_err", message: String(e) })),
+      );
+    };
+
+    // 恢复已存的 usage 累计（resume 时不至于从 0 开始显示）
+    if (input.resumeSid) {
+      const usagePath = path.join(sessionDir(meta.sid), "usage.jsonl");
+      if (await exists(usagePath)) {
+        const raw = await readText(usagePath);
+        for (const line of raw.split("\n")) {
+          if (!line) continue;
+          try {
+            const rec = JSON.parse(line) as UsageRecord;
+            cumPromptTokens += rec.promptTokens;
+            cumCompletionTokens += rec.completionTokens;
+            cumCostCny += rec.costCny;
+          } catch {}
+        }
+        usageDirty = true; // resume 后先推一次给前端
+      }
+    }
+
+    // 本节原文：verbatim 引用校验用（session 一节内不变，预取一次）
+    const sectionText = await getSection(meta.bookSlug, meta.sectionId);
+
     while (turnIdx < meta.maxTurns) {
       if (input.signal.aborted) break;
       turnIdx++;
@@ -452,6 +524,7 @@ export async function* runSession(
         temperature: 0.7,
         maxTokens: 800,
         signal: input.signal,
+        onUsage: recordUsage("teacher", turnIdx),
       })) {
         teacherText += chunk;
         yield { type: "chunk", actor: "teacher", turn: turnIdx, text: chunk };
@@ -464,6 +537,22 @@ export async function* runSession(
       };
       turns.push(teacherTurn);
       await appendTurn(meta.sid, teacherTurn);
+
+      // ---- verbatim 引用校验（教师专用）----
+      const cites: Citation[] = verifyTurnCitations(
+        teacherText,
+        meta.sectionId,
+        sectionText,
+      );
+      if (cites.length > 0) {
+        appendLine(
+          path.join(sessionDir(meta.sid), "citations.jsonl"),
+          JSON.stringify({ turn: turnIdx, ts: Date.now(), cites }),
+        ).catch((e) =>
+          console.log(JSON.stringify({ tag: "citations_write_err", message: String(e) })),
+        );
+      }
+
       yield { type: "turn_end", actor: "teacher", turn: turnIdx, text: teacherText };
 
       if (input.signal.aborted) break;
@@ -494,6 +583,7 @@ export async function* runSession(
         temperature: 0.8,
         maxTokens: 500,
         signal: input.signal,
+        onUsage: recordUsage("learner", turnIdx),
       })) {
         learnerText += chunk;
         yield { type: "chunk", actor: "learner", turn: turnIdx, text: chunk };
@@ -527,6 +617,7 @@ export async function* runSession(
                 pacing: meta.pacing,
                 turns,
                 signal: input.signal,
+                onUsage: recordUsage("coach", turnIdx),
               });
               if (a) {
                 coachAnalysis = a;
@@ -546,6 +637,7 @@ export async function* runSession(
                 pacing: meta.pacing,
                 turns,
                 signal: input.signal,
+                onUsage: recordUsage("coach", turnIdx),
               });
               if (a) {
                 learnerCoachAnalysis = a;
@@ -618,6 +710,7 @@ export async function* runSession(
             meta.teacherSummary,
             meta.teacherSummaryUpto,
             input.signal,
+            recordUsage("audit", turnIdx),
           ),
           maybeCompress(
             "learner",
@@ -625,6 +718,7 @@ export async function* runSession(
             meta.learnerSummary,
             meta.learnerSummaryUpto,
             input.signal,
+            recordUsage("audit", turnIdx),
           ),
         ]);
         if (teacherCompressed) {
@@ -639,6 +733,17 @@ export async function* runSession(
           await writeMeta(meta);
           yield { type: "compressed", side: "learner", upto: learnerCompressed.upto };
         }
+      }
+
+      // ---- 每轮末尾 push 一次 usage 累计给前端 ----
+      if (usageDirty) {
+        usageDirty = false;
+        yield {
+          type: "usage",
+          promptTokens: cumPromptTokens,
+          completionTokens: cumCompletionTokens,
+          costCny: cumCostCny,
+        };
       }
     }
 
