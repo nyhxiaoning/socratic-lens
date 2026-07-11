@@ -29,19 +29,31 @@ function requireEnv(key: string): string {
   return v;
 }
 
-function pickModel(purpose: Purpose): string {
+export function pickModel(purpose: Purpose): string {
+  if (purpose === "audit") {
+    const auditModel = process.env.LLM_AUDIT_MODEL || process.env.LLM_MODEL_AUDIT;
+    if (auditModel) return auditModel;
+    return requireEnv("LLM_MODEL");
+  }
   const override = process.env[`LLM_MODEL_${purpose.toUpperCase()}`];
   return override || requireEnv("LLM_MODEL");
 }
 
-let clientCache: OpenAI | null = null;
-function getClient(): OpenAI {
-  if (clientCache) return clientCache;
-  clientCache = new OpenAI({
-    apiKey: requireEnv("LLM_API_KEY"),
-    baseURL: requireEnv("LLM_BASE_URL"),
-  });
-  return clientCache;
+const clientCache = new Map<string, OpenAI>();
+export function getClient(purpose: Purpose): OpenAI {
+  // audit 若配了独立端点，用独立 key + baseURL；否则回落共享
+  const useAudit = purpose === "audit" && !!process.env.LLM_AUDIT_BASE_URL;
+  const baseURL = useAudit
+    ? requireEnv("LLM_AUDIT_BASE_URL")
+    : requireEnv("LLM_BASE_URL");
+  const apiKey = useAudit
+    ? (process.env.LLM_AUDIT_API_KEY || requireEnv("LLM_API_KEY"))
+    : requireEnv("LLM_API_KEY");
+  const cached = clientCache.get(baseURL);
+  if (cached) return cached;
+  const client = new OpenAI({ apiKey, baseURL });
+  clientCache.set(baseURL, client);
+  return client;
 }
 
 function logCall(
@@ -94,7 +106,7 @@ export function callLLM(
   messages: LLMMessage[],
   opts: LLMOptions = {},
 ): Promise<string> | AsyncIterable<string> {
-  const client = getClient();
+  const client = getClient(purpose);
   const model = pickModel(purpose);
   const inputChars = messages.reduce((s, m) => s + m.content.length, 0);
   const t0 = Date.now();
