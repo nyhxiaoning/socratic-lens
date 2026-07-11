@@ -1,6 +1,6 @@
 import path from "node:path";
 import { callLLM } from "./llm";
-import { readText, PROMPTS_ROOT } from "./storage";
+import { readText, PROMPTS_ROOT, ensureDir, writeAtomic, DATA_ROOT } from "./storage";
 import { normalizeForMatch } from "./citations";
 
 // —— 类型契约（见 plan）——
@@ -231,8 +231,12 @@ export async function extractChecklist(sourceText: string, signal: AbortSignal):
   throw new Error(`Fidelity 抽清单失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
-/** 勾稽：清单 + 合成节 → LLM → Row[]（含 verbatim 校验）。解析失败重试 1 次。 */
-export async function reconcile(checklist: Checklist, synthText: string, signal: AbortSignal): Promise<Row[]> {
+/** 勾稽：清单 + 合成节 → LLM → Row[]（含 verbatim 校验）+ verdict。解析失败重试 1 次。 */
+export async function reconcile(
+  checklist: Checklist,
+  synthText: string,
+  signal: AbortSignal,
+): Promise<{ rows: Row[]; verdict: string }> {
   const rules = await readText(path.join(PROMPTS_ROOT, "fidelity_reconcile.md"));
   const user = [
     `## 源材料清单（JSON）`,
@@ -252,12 +256,95 @@ export async function reconcile(checklist: Checklist, synthText: string, signal:
       { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
     );
     try {
-      const rows = parseReconciliation(raw);
-      return verifyQuotes(rows, synthText);
+      const rows = verifyQuotes(parseReconciliation(raw), synthText);
+      let verdict = "";
+      try {
+        const o = JSON.parse(raw) as { verdict?: unknown };
+        if (o.verdict != null) verdict = String(o.verdict);
+      } catch {
+        /* verdict 可选，拿不到就空 */
+      }
+      return { rows, verdict };
     } catch (e) {
       lastErr = e;
       if (signal.aborted) break;
     }
   }
   throw new Error(`Fidelity 勾稽失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+}
+
+export const FIDELITY_ROOT = path.join(DATA_ROOT, "fidelity");
+
+export function newFid(): string {
+  const ts = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `f-${ts}-${rand}`;
+}
+
+type FidelityMeta = {
+  fid: string;
+  sampleName?: string;
+  model: string;
+  independentEndpoint: boolean;
+  startedAt: number;
+  endedAt?: number;
+  status: "running" | "done" | "errored";
+  error?: string;
+};
+
+export async function runFidelity(
+  sourceText: string,
+  synthText: string,
+  signal: AbortSignal,
+  opts: { sampleName?: string } = {},
+): Promise<FidelityResult> {
+  const fid = newFid();
+  const dir = path.join(FIDELITY_ROOT, fid);
+  await ensureDir(dir);
+
+  const independentEndpoint = !!process.env.LLM_AUDIT_BASE_URL;
+  const model =
+    process.env.LLM_AUDIT_MODEL || process.env.LLM_MODEL_AUDIT || process.env.LLM_MODEL || "";
+  const meta: FidelityMeta = {
+    fid,
+    sampleName: opts.sampleName,
+    model,
+    independentEndpoint,
+    startedAt: Date.now(),
+    status: "running",
+  };
+  await writeAtomic(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+
+  try {
+    const checklist = await extractChecklist(sourceText, signal);
+    await writeAtomic(path.join(dir, "checklist.json"), JSON.stringify(checklist, null, 2));
+
+    const { rows, verdict: llmVerdict } = await reconcile(checklist, synthText, signal);
+    const coverage = computeCoverage(rows);
+    const verdict = llmVerdict || deriveVerdict(coverage);
+    const reportJson = { rows, coverage, verdict };
+    await writeAtomic(path.join(dir, "report.json"), JSON.stringify(reportJson, null, 2));
+    await writeAtomic(path.join(dir, "report.md"), renderReportMd(rows, coverage, verdict));
+
+    meta.status = "done";
+    meta.endedAt = Date.now();
+    await writeAtomic(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+
+    return { fid, checklist, rows, coverage, verdict, dir };
+  } catch (err) {
+    meta.status = "errored";
+    meta.endedAt = Date.now();
+    meta.error = err instanceof Error ? err.message : String(err);
+    await writeAtomic(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2)).catch(() => {});
+    throw err;
+  }
+}
+
+/** 覆盖率兜底 verdict（LLM 没给 verdict 时用）。 */
+function deriveVerdict(cov: Coverage): string {
+  if (cov.total === 0) return "无可勾稽条目。";
+  const pct = Math.round(cov.coverageRate * 100);
+  if (cov.dropped === 0 && cov.morphed === 0) return `保真度高：${cov.total} 条全部落地。`;
+  if (cov.dropped === 0) return `保真度尚可：落地 ${pct}%，${cov.morphed} 条讲法有变形需人核。`;
+  return `保真度存疑：${cov.dropped} 条漏、${cov.morphed} 条变形，落地率 ${pct}%。`;
 }
