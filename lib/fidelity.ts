@@ -208,9 +208,10 @@ export function renderChecklistMd(c: Checklist): string {
 
 const MAX_LLM_ATTEMPTS = 2;
 
-/** 抽清单：读源章 → LLM → 结构化 Checklist。解析失败重试 1 次。 */
-export async function extractChecklist(sourceText: string, signal: AbortSignal): Promise<Checklist> {
-  const rules = await readText(path.join(PROMPTS_ROOT, "fidelity_extract.md"));
+/** 抽清单：读源章 → LLM → 结构化 Checklist。解析失败重试 1 次。
+ *  @param rulesFile 可选 prompt 文件名，默认 fidelity_extract.md（覆盖度审计可传不同 prompt）。 */
+export async function extractChecklist(sourceText: string, signal: AbortSignal, rulesFile?: string): Promise<Checklist> {
+  const rules = await readText(path.join(PROMPTS_ROOT, rulesFile ?? "fidelity_extract.md"));
   let lastErr: unknown;
   for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
     const raw = await callLLM(

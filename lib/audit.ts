@@ -15,23 +15,26 @@ import {
   SESSIONS_ROOT,
   writeAtomic,
 } from "./storage";
-import { runFidelity, FIDELITY_ROOT } from "./fidelity";
+import { runFidelity, computeCoverage, FIDELITY_ROOT } from "./fidelity";
+import { reconcileAgainstTranscript, renderCoverageReportMd, deriveCoverageVerdict } from "./coverage";
 
-/** 审计维度：审书本身、审教师教学质量、Fidelity 保真度审计。 */
-export type AuditDimension = "book" | "teacher" | "fidelity";
+/** 审计维度：审书本身、审教师教学质量、Fidelity 保真度审计、教学覆盖度审计。 */
+export type AuditDimension = "book" | "teacher" | "fidelity" | "coverage";
 
 /** 每个维度的 tag 集合（顺序即报告顺序，END 是终止符不入报告）。
- *  fidelity 维度不用 ===TAG===，其 report.md 是纯 markdown，tags 为空。 */
+ *  fidelity/coverage 维度不用 ===TAG===，其 report.md 是纯 markdown，tags 为空。 */
 const DIMENSION_TAGS: Record<AuditDimension, string[]> = {
   book: ["VERDICT", "CLARITY", "HARD_SPOTS", "INCONSISTENCY", "SUGGESTIONS"],
   teacher: ["VERDICT", "METHOD", "PERSONA_FIT", "RULE_VIOLATIONS", "RULE_SUGGESTIONS"],
   fidelity: [],
+  coverage: [],
 };
 
 const DIMENSION_RULES_FILE: Record<AuditDimension, string> = {
   book: "audit_rules.md",
   teacher: "audit_teacher_rules.md",
   fidelity: "",
+  coverage: "",
 };
 
 /** 已解析的审计报告：tag → 段落文本（外加 raw）。 */
@@ -428,6 +431,139 @@ export async function* runFidelityAudit(
     await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2)).catch(() => {});
     yield { type: "audit_error", message };
   }
+}
+
+/**
+ * 教学覆盖度审计：从源材料（或书本原文）提取知识点清单 → 与教学对话 transcript 逐条勾稽。
+ * 不依赖 ===TAG=== 协议，输出纯 markdown 报告。
+ * @param sids 要审计的会话 ID 列表（目前只取第一个）
+ * @param sampleName 可选：源材料样本名，不提供则从书本原文提取
+ */
+export async function* runCoverageAudit(
+  sids: string[],
+  signal: AbortSignal,
+  sampleName?: string,
+): AsyncGenerator<AuditEvent> {
+  const aid = newAid();
+  const meta: AuditMeta = {
+    aid,
+    bookSlug: "",
+    dimension: "coverage",
+    sids,
+    sectionIds: [],
+    sampleName,
+    startedAt: Date.now(),
+    status: "running",
+  };
+
+  try {
+    await ensureDir(auditDir(aid));
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
+    yield { type: "audit_start", aid, dimension: "coverage", sids, sampleName };
+
+    // 取第一个会话确定 bookSlug + sectionId
+    const sid = sids[0];
+    const sm = await readJson<SessionMeta>(sessionMetaPath(sid));
+    const book = await getBook(sm.bookSlug);
+    meta.bookSlug = sm.bookSlug;
+    meta.sectionIds = [sm.sectionId];
+    const sectionTitle = getSectionTitle(book, sm.sectionId);
+
+    // 确定知识来源
+    let sourceText: string;
+    let sourceLabel: string;
+    if (sampleName) {
+      const srcPath = path.join(FIDELITY_ROOT, "..", "fidelity-samples", sampleName, "source.md");
+      sourceText = await fs.readFile(srcPath, "utf-8");
+      sourceLabel = `源材料「${sampleName}」`;
+    } else {
+      sourceText = await getSection(sm.bookSlug, sm.sectionId);
+      sourceLabel = `书本原文「${book.title}」§${sm.sectionId} ${sectionTitle}（AI 从节中推断，非外部源材料）`;
+    }
+
+    yield { type: "audit_chunk", text: `正在提取「${sectionTitle}」的教学清单……\n\n` };
+
+    // 1. 提取清单
+    const { extractChecklist } = await import("./fidelity");
+    const checklist = await extractChecklist(sourceText, signal);
+    const totalItems =
+      checklist.knowledgePoints.length +
+      checklist.assessmentCriteria.length +
+      checklist.exercises.length +
+      checklist.errorSpots.length;
+    yield { type: "audit_chunk", text: `  提取到 ${totalItems} 条。\n\n  加载会话 ${sid}……\n\n` };
+
+    // 2. 加载并格式化对话
+    const turns = await loadTurns(sid, sm.turnsSoFar);
+    if (turns.length === 0) throw new Error("所选会话没有对话记录");
+    const transcriptText = formatTranscript(turns);
+    const transcriptInfo = `  对话共 ${turns.length} 轮（${Math.round(transcriptText.length / 100) * 100}+ 字符）。\n\n  正在勾稽「${sectionTitle}」的教学覆盖度……\n\n`;
+    yield { type: "audit_chunk", text: transcriptInfo };
+
+    // 长对话截断（>16k 字符）
+    const MAX_TRANSCRIPT_CHARS = 16000;
+    const reconcileTranscript = transcriptText.length > MAX_TRANSCRIPT_CHARS
+      ? truncateTranscript(transcriptText)
+      : transcriptText;
+
+    // 3. 勾稽
+    const { rows, verdict: llmVerdict } = await reconcileAgainstTranscript(checklist, reconcileTranscript, signal);
+    const coverage = computeCoverage(rows);
+    const verdict = llmVerdict || deriveCoverageVerdict(coverage);
+
+    // 4. 落盘
+    const reportMd = renderCoverageReportMd(rows, coverage, verdict, sourceLabel);
+    const reportJson = { rows, coverage, verdict, sourceLabel };
+    await writeAtomic(path.join(auditDir(aid), "report.md"), reportMd);
+    await writeAtomic(path.join(auditDir(aid), "report.json"), JSON.stringify(reportJson, null, 2));
+    await writeAtomic(path.join(auditDir(aid), "checklist.json"), JSON.stringify(checklist, null, 2));
+
+    meta.status = "done";
+    meta.endedAt = Date.now();
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
+
+    // 5. 审计历史
+    await appendLine(
+      path.join(AUDITS_ROOT, "history.jsonl"),
+      JSON.stringify({
+        aid,
+        bookSlug: sm.bookSlug,
+        dimension: "coverage",
+        sectionIds: [sm.sectionId],
+        sidCount: 1,
+        verdict,
+        ts: Date.now(),
+      }),
+    );
+
+    yield { type: "audit_chunk", text: `\n✅ 审计完成：覆盖 ${coverage.landed}/${coverage.total}（${Math.round(coverage.coverageRate * 100)}%）· 漏 ${coverage.dropped}\n` };
+    yield { type: "audit_done", aid, report: { sections: {}, raw: reportMd } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    meta.status = "errored";
+    meta.endedAt = Date.now();
+    meta.error = message;
+    await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2)).catch(() => {});
+    yield { type: "audit_error", message };
+  }
+}
+
+/** 长对话截断：保留前 2 轮 + 最近 8 轮 + 中间省略标记。 */
+function truncateTranscript(text: string): string {
+  const lines = text.split("\n");
+  const turnStarts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^【(教师|学生)】/.test(lines[i])) turnStarts.push(i);
+  }
+  if (turnStarts.length <= 12) return text;
+
+  const firstEnd = turnStarts[Math.min(3, turnStarts.length - 9)];
+  const lastStart = turnStarts[Math.max(turnStarts.length - 8, 0)];
+
+  const head = lines.slice(0, firstEnd).join("\n");
+  const tail = lines.slice(lastStart).join("\n");
+  const omitted = Math.round((lastStart - firstEnd) / 2);
+  return `${head}\n\n...（中间 ${omitted} 轮对话已省略，保留前 2 轮 + 最近 8 轮）...\n\n${tail}`;
 }
 
 /**
