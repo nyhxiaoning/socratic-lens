@@ -154,6 +154,9 @@ export function callLLM(
   }
 
   return (async () => {
+    // 一些模型（如 DeepSeek v4 flash）的 json_object mode 返回空内容。
+    // 检测到已知不兼容的模型时跳过 response_format，靠 prompt 约束保 JSON 输出。
+    const skipJsonResp = opts.jsonMode && /deepseek/i.test(model);
     const resp = await client.chat.completions.create(
       {
         model,
@@ -161,7 +164,7 @@ export function callLLM(
         stream: false,
         max_tokens: opts.maxTokens,
         temperature: opts.temperature,
-        response_format: opts.jsonMode ? { type: "json_object" } : undefined,
+        response_format: opts.jsonMode && !skipJsonResp ? { type: "json_object" } : undefined,
       },
       { signal: opts.signal },
     );
