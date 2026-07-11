@@ -19,3 +19,7 @@ data/books/*
 data/books/**/*.pages.json
 
 .debug/
+
+# 工具本地状态，不入版本控制
+.claude/
+.omo/
