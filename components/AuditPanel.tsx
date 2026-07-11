@@ -51,7 +51,7 @@ export function AuditPicker({
   const [samples, setSamples] = useState<{ name: string; hasSource: boolean; hasSynth: boolean }[]>([]);
   const [selectedSample, setSelectedSample] = useState<string>("");
   useEffect(() => {
-    if (dimension === "fidelity") {
+    if (dimension === "fidelity" || dimension === "coverage") {
       fetch("/api/fidelity-samples")
         .then((r) => r.json())
         .then((d) => {
@@ -80,9 +80,15 @@ export function AuditPicker({
           alignItems: "center",
         }}
       >
-        <strong style={{ fontSize: 14 }}>{dimension === "fidelity" ? "选要审的保真度样本" : "选要一起送审的会话"}</strong>
+        <strong style={{ fontSize: 14 }}>
+          {dimension === "fidelity" ? "选要审的保真度样本" :
+           dimension === "coverage" ? "选要审教学覆盖度的会话" :
+           "选要一起送审的会话"}
+        </strong>
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
-          {dimension === "fidelity" ? "源材料 vs 合成节 勾稽" : `跨多节 = 合审。已选 ${picked.size} 个`}
+          {dimension === "fidelity" ? "源材料 vs 合成节 勾稽" :
+           dimension === "coverage" ? "对话 vs 知识点清单" :
+           `跨多节 = 合审。已选 ${picked.size} 个`}
         </div>
       </div>
 
@@ -104,8 +110,8 @@ export function AuditPicker({
         </span>
       </div>
 
-      {/* Fidelity 保真度审计：选样本 */}
-      {dimension === "fidelity" ? (
+      {/* Fidelity 保真度：选样本 */}
+      {dimension === "fidelity" && (
         <div
           style={{
             maxHeight: 200,
@@ -146,8 +152,100 @@ export function AuditPicker({
             ))
           )}
         </div>
-      ) : (
-        /* 普通审计：选会话 */
+      )}
+
+      {/* 教学覆盖度：选会话 + 可选源材料 */}
+      {dimension === "coverage" && (
+        <div>
+          <div style={{ marginBottom: 8, padding: "4px 0", fontSize: 12, color: "var(--muted)" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={!!selectedSample}
+                onChange={(e) => {
+                  if (!e.target.checked) setSelectedSample("");
+                  else if (samples.length > 0) setSelectedSample(samples[0].name);
+                }}
+              />
+              使用源材料（不勾则从书本原文推断知识点）
+            </label>
+            {selectedSample && (
+              <div style={{ marginTop: 6 }}>
+                <select
+                  value={selectedSample}
+                  onChange={(e) => setSelectedSample(e.target.value)}
+                  style={{ width: "100%", fontSize: 12, padding: "2px 4px" }}
+                >
+                  {samples.filter((s) => s.hasSource && s.hasSynth).map((s) => (
+                    <option key={s.name} value={s.name}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+          <div
+            style={{
+              maxHeight: 200,
+              overflowY: "auto",
+              padding: 8,
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+            }}
+          >
+            {orderedSectionIds
+              .filter((sid) => grouped.has(sid))
+              .map((secId) => {
+                const list = grouped.get(secId)!;
+                const secTitle = book?.sections.find((s) => s.id === secId)?.title ?? secId;
+                return (
+                  <div key={secId} style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+                      §{secId} {secTitle}
+                    </div>
+                    {list.map((s) => (
+                      <label
+                        key={s.sid}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "4px 6px",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          background: picked.has(s.sid) ? "var(--teacher)" : "transparent",
+                          borderRadius: 4,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={picked.has(s.sid)}
+                          onChange={() => onTogglePick(s.sid)}
+                        />
+                        <span style={{ color: s.status === "done" ? "inherit" : "var(--muted)" }}>
+                          {s.sid}
+                          {s.sid === currentSid && "（本次）"}
+                        </span>
+                        <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
+                          {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+                          {s.status}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                );
+              })}
+            {sessions.length === 0 && (
+              <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
+                这本书还没有其它会话。
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* book / teacher：仅选会话 */}
+      {(dimension === "book" || dimension === "teacher") && (
         <div
           style={{
             maxHeight: 260,
@@ -268,6 +366,10 @@ export function AuditPicker({
         {dimension === "fidelity" ? (
           <button className="primary" onClick={() => onSubmit(selectedSample)} disabled={!selectedSample}>
             开始审计 · 保真度（{selectedSample || "未选"}）
+          </button>
+        ) : dimension === "coverage" ? (
+          <button className="primary" onClick={() => onSubmit(selectedSample)} disabled={picked.size === 0}>
+            开始审计 · 教学覆盖度（{picked.size} 会话{selectedSample ? ` · 源=${selectedSample}` : ""}）
           </button>
         ) : (
           <button className="primary" onClick={() => onSubmit()} disabled={picked.size === 0}>

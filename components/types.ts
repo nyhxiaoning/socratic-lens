@@ -120,7 +120,7 @@ export type SessionEvent =
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
-export type AuditDimension = "book" | "teacher" | "fidelity";
+export type AuditDimension = "book" | "teacher" | "fidelity" | "coverage";
 
 export type AuditHistoryItem = {
   aid: string;
@@ -157,10 +157,12 @@ export const SECTION_LABELS: Record<string, string> = {
   COVERAGE: "覆盖率",
   KNOWLEDGE_CHECK: "知识点 / 评价标准 / 易错点 勾稽",
   EXERCISE_CHECK: "教材原题勾稽",
+  // 教学覆盖度维度（复用 fidelity 标签，report 是纯 markdown 无 ===TAG===）
 };
 
 export const AUDIT_DIMENSIONS: { id: AuditDimension; label: string; desc: string }[] = [
   { id: "book", label: "书质量", desc: "审这本书讲得清不清，产出面向更新造书流程" },
   { id: "teacher", label: "教师教学质量", desc: "审教师照约束教得对不对，产出面向更新教师约束" },
   { id: "fidelity", label: "保真度", desc: "审合成节有没有丢/歪源材料的教学目标、知识点、原题" },
+  { id: "coverage", label: "教学覆盖度", desc: "审教师对话里有没有覆盖源材料/书本的所有知识点" },
 ];
