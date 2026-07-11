@@ -120,8 +120,20 @@ export type SessionEvent =
   | { type: "done"; sid: string }
   | { type: "error"; message: string };
 
+export type AuditDimension = "book" | "teacher";
+
+export type AuditHistoryItem = {
+  aid: string;
+  bookSlug: string;
+  dimension: AuditDimension;
+  sectionIds: string[];
+  sidCount: number;
+  verdict: string;
+  ts: number;
+};
+
 export type AuditEvent =
-  | { type: "audit_start"; aid: string; sids: string[]; sectionIds: string[] }
+  | { type: "audit_start"; aid: string; dimension?: AuditDimension; sids: string[]; sectionIds: string[] }
   | { type: "audit_chunk"; text: string }
   | { type: "audit_done"; aid: string; report: { raw: string } }
   | { type: "audit_error"; message: string };
@@ -129,9 +141,20 @@ export type AuditEvent =
 export const CITE_RE = /〔§([\w-]{1,32})(?:[｜|]([^〕\n]{0,120}))?〕/g;
 
 export const SECTION_LABELS: Record<string, string> = {
+  // 书质量维度
   VERDICT: "一句话结论",
   CLARITY: "表达清晰度问题",
   HARD_SPOTS: "学生真正卡住的点",
   INCONSISTENCY: "教师讲的 vs 原文（关键）",
   SUGGESTIONS: "对书本身的修改建议",
+  // 教师教学质量维度
+  METHOD: "苏格拉底提问执行质量",
+  PERSONA_FIT: "画像/节奏适配",
+  RULE_VIOLATIONS: "违反铁律（关键）",
+  RULE_SUGGESTIONS: "对教师约束的修改建议",
 };
+
+export const AUDIT_DIMENSIONS: { id: AuditDimension; label: string; desc: string }[] = [
+  { id: "book", label: "书质量", desc: "审这本书讲得清不清，产出面向更新造书流程" },
+  { id: "teacher", label: "教师教学质量", desc: "审教师照约束教得对不对，产出面向更新教师约束" },
+];

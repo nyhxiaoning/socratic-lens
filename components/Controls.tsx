@@ -36,6 +36,16 @@ type ControlsProps = {
   onStart: () => void;
   onStop: () => void;
   onHistory: () => void;
+  onUpload: () => void;
+  // 批量矩阵
+  batchMode: boolean;
+  onBatchMode: (v: boolean) => void;
+  selectedLearners: Set<LearnerId>;
+  onToggleLearner: (id: LearnerId) => void;
+  selectedPacings: Set<Pacing>;
+  onTogglePacing: (id: Pacing) => void;
+  batchRunning: boolean;
+  onRunBatch: () => void;
 };
 
 /** 顶部设置栏：书 / 节 / 学生 / 节奏 / 教练 / 轮数 + 开始/停止/历史。 */
@@ -48,6 +58,8 @@ export function Controls(p: ControlsProps) {
         : p.learnerCoachEnabled
           ? "learner"
           : "off";
+
+  const comboCount = p.selectedLearners.size * p.selectedPacings.size;
 
   return (
     <section
@@ -91,33 +103,79 @@ export function Controls(p: ControlsProps) {
         </select>
       </Field>
 
-      <Field label="学生">
-        <select
-          value={p.learnerId}
-          onChange={(e) => p.onLearnerId(e.target.value as LearnerId)}
-          disabled={p.running}
-        >
-          {LEARNERS.map((l) => (
-            <option key={l.id} value={l.id} title={l.desc}>
-              {l.label}
-            </option>
-          ))}
-        </select>
-      </Field>
+      {!p.batchMode ? (
+        <>
+          <Field label="学生">
+            <select
+              value={p.learnerId}
+              onChange={(e) => p.onLearnerId(e.target.value as LearnerId)}
+              disabled={p.running}
+            >
+              {LEARNERS.map((l) => (
+                <option key={l.id} value={l.id} title={l.desc}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-      <Field label="节奏">
-        <select
-          value={p.pacing}
-          onChange={(e) => p.onPacing(e.target.value as Pacing)}
-          disabled={p.running}
-        >
-          {PACINGS.map((pc) => (
-            <option key={pc.id} value={pc.id} title={pc.desc}>
-              {pc.label}
-            </option>
-          ))}
-        </select>
-      </Field>
+          <Field label="节奏">
+            <select
+              value={p.pacing}
+              onChange={(e) => p.onPacing(e.target.value as Pacing)}
+              disabled={p.running}
+            >
+              {PACINGS.map((pc) => (
+                <option key={pc.id} value={pc.id} title={pc.desc}>
+                  {pc.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label="学生（多选）">
+            <div style={{ display: "flex", gap: 8, alignItems: "center", height: 30 }}>
+              {LEARNERS.map((l) => (
+                <label
+                  key={l.id}
+                  title={l.desc}
+                  style={{ display: "flex", gap: 3, alignItems: "center", fontSize: 12, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={p.selectedLearners.has(l.id)}
+                    onChange={() => p.onToggleLearner(l.id)}
+                    disabled={p.running}
+                  />
+                  {l.label}
+                </label>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="节奏（多选）">
+            <div style={{ display: "flex", gap: 8, alignItems: "center", height: 30 }}>
+              {PACINGS.map((pc) => (
+                <label
+                  key={pc.id}
+                  title={pc.desc}
+                  style={{ display: "flex", gap: 3, alignItems: "center", fontSize: 12, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={p.selectedPacings.has(pc.id)}
+                    onChange={() => p.onTogglePacing(pc.id)}
+                    disabled={p.running}
+                  />
+                  {pc.label}
+                </label>
+              ))}
+            </div>
+          </Field>
+        </>
+      )}
 
       <Field label="教练">
         <select
@@ -152,16 +210,43 @@ export function Controls(p: ControlsProps) {
 
       <div style={{ flex: 1 }} />
 
+      <Field label="批量">
+        <label
+          style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, cursor: "pointer", height: 30 }}
+          title="同一节 × 多画像 × 多节奏，串行跑完后可一起送审"
+        >
+          <input
+            type="checkbox"
+            checked={p.batchMode}
+            onChange={(e) => p.onBatchMode(e.target.checked)}
+            disabled={p.running}
+          />
+          矩阵
+        </label>
+      </Field>
+
       {!p.running ? (
         <>
+          <button onClick={p.onUpload}>上传书…</button>
           <button onClick={p.onHistory}>历史…</button>
-          <button className="primary" onClick={p.onStart} disabled={!p.canStart}>
-            开始
-          </button>
+          {p.batchMode ? (
+            <button
+              className="primary"
+              onClick={p.onRunBatch}
+              disabled={!p.bookSlug || !p.sectionId || comboCount === 0}
+              title="串行跑完所有组合"
+            >
+              批量开始（{comboCount}）
+            </button>
+          ) : (
+            <button className="primary" onClick={p.onStart} disabled={!p.canStart}>
+              开始
+            </button>
+          )}
         </>
       ) : (
         <button className="danger" onClick={p.onStop}>
-          停止
+          停止{p.batchRunning ? "批量" : ""}
         </button>
       )}
     </section>

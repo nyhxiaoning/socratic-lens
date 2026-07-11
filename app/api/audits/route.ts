@@ -1,5 +1,5 @@
-import { NextRequest } from "next/server";
-import { runAudit, type AuditEvent } from "@/lib/audit";
+import { NextRequest, NextResponse } from "next/server";
+import { runAudit, listAuditHistory, type AuditEvent, type AuditDimension } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +9,16 @@ function sseFrame(ev: AuditEvent): Uint8Array {
   return encoder.encode(`data: ${JSON.stringify(ev)}\n\n`);
 }
 
-/** POST /api/audits { sids: string[] } → SSE 流 */
+/** GET /api/audits?bookSlug=xxx → 该书的审计历史（倒序）。 */
+export async function GET(req: NextRequest) {
+  const bookSlug = req.nextUrl.searchParams.get("bookSlug") || undefined;
+  const items = await listAuditHistory(bookSlug);
+  return NextResponse.json({ audits: items });
+}
+
+/** POST /api/audits { sids: string[], dimension?: "book"|"teacher" } → SSE 流 */
 export async function POST(req: NextRequest) {
-  let body: { sids?: string[] };
+  let body: { sids?: string[]; dimension?: string };
   try {
     body = await req.json();
   } catch {
@@ -21,6 +28,7 @@ export async function POST(req: NextRequest) {
   if (sids.length === 0) {
     return new Response(JSON.stringify({ error: "sids 必填且非空" }), { status: 400 });
   }
+  const dimension: AuditDimension = body.dimension === "teacher" ? "teacher" : "book";
 
   const abortCtrl = new AbortController();
   req.signal.addEventListener("abort", () => abortCtrl.abort(), { once: true });
@@ -28,7 +36,7 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const ev of runAudit(sids, abortCtrl.signal)) {
+        for await (const ev of runAudit(sids, abortCtrl.signal, dimension)) {
           controller.enqueue(sseFrame(ev));
           if (ev.type === "audit_done" || ev.type === "audit_error") break;
         }
