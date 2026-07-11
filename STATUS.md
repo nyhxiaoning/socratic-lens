@@ -183,6 +183,7 @@ data/
 3. **教师风格多样化**——目前只有一份 `teacher_rules.md`。可以加"耐心"/"严厉"/"跳跃"等档位，看不同风格教师暴露的书本问题会不会不同（批量矩阵已经能跑多画像 × 多节奏，风格是第三个轴）。
 4. **摘要 prompt 外置**——现在硬编码在 `session.ts`，想可调得改代码。挪进 `prompts/`。
 5. **把"问题层级 / 三级严重度"同步进造书流程文档**——`破卷适配教科书/HOW-TO-BUILD-AND-AUDIT.md` 目前只有三级严重度，没有"局部 vs 体裁性"这一层（本项目 audit_rules 已加）。
+6. **Fidelity 审计 Phase 2（回接 API + UI）**——审计逻辑已在 `lib/fidelity.ts` 跑通（CLI：`node --import tsx scripts/fidelity-audit.mts <sample>`）。尚未回接 `/api/audits`（加 `dimension:"fidelity"`、审计面板选源材料、进审计历史）。详见 `docs/superpowers/specs/2026-07-11-fidelity-audit-design.md` §8。
 
 ## 沟通与运行
 
