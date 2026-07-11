@@ -27,9 +27,8 @@
 
 - `synthQuote` 必须是 transcript 里**老师说话的原句**（后续会做逐字校验——来自学生的引语标注 `(student says)`）。
 - 拿不准落地与否时，倾向 **dropped**——审计宁可多报漏，不可漏报漏。
-- **只输出 JSON**，不要解释、不要 markdown 代码围栏。结构：
+- **只输出 JSON**，不要任何解释文字、不要 markdown 代码围栏。结构：
 
-```json
 {
   "rows": [
     { "checklistId": "kp1", "category": "knowledgePoint", "itemName": "...", "status": "landed", "synthQuote": "老师的原句" },
@@ -37,7 +36,6 @@
   ],
   "verdict": "一句话总评：覆盖度如何——核心点是否都讲到了，漏的是不是要害。"
 }
-```
 
 - category 取值：knowledgePoint / criteria / exercise / errorSpot（与清单条目对应）。
 - 清单里每一条都必须在 rows 里出现一次，用相同的 id 作 checklistId。

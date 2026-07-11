@@ -43,20 +43,31 @@ export type FidelityResult = {
 };
 
 function parseJsonLoose(raw: string): unknown {
+  // 1. 只尝试直接解析
   try {
     return JSON.parse(raw);
-  } catch {
-    // 有的模型会包一层 ```json ... ```，剥掉再试
-    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence) {
-      try {
-        return JSON.parse(fence[1]);
-      } catch {
-        /* fallthrough */
-      }
-    }
-    throw new Error(`Fidelity: LLM 输出不是合法 JSON`);
+  } catch { /* fallthrough */ }
+
+  // 2. 剥 ```json ... ``` / ``` ... ``` 围栏
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch { /* fallthrough */ }
   }
+
+  // 3. 兜底：取第一个 { 到最后一个 } 之间
+  const firstBrace = raw.indexOf("{");
+  if (firstBrace >= 0) {
+    const lastBrace = raw.lastIndexOf("}");
+    if (lastBrace > firstBrace) {
+      try {
+        return JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+      } catch { /* fallthrough */ }
+    }
+  }
+
+  throw new Error(`Fidelity: LLM 输出不是合法 JSON`);
 }
 
 function asArray(v: unknown): unknown[] {

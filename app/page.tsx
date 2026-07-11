@@ -259,6 +259,9 @@ export default function Page() {
           onViewHistory={s.viewAudit}
           onCancel={() => s.setShowAuditPanel(false)}
           onSubmit={(sampleName?: string) => s.runAudit(Array.from(s.pickedSids), s.auditDimension, sampleName)}
+          checklistStatus={s.checklistStatus}
+          generatingSections={s.generatingSections}
+          onGenerateChecklist={s.generateChecklist}
         />
       )}
 

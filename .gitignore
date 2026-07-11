@@ -6,11 +6,11 @@ next-env.d.ts
 tsconfig.tsbuildinfo
 pnpm-workspace.yaml
 
-# 运行时数据（会话记录、审计报告），不入版本控制
+# 运行时数据（会话记录、审计报告、知识点清单缓存），不入版本控制
 data/sessions/
 data/audits/
+/data/checklists/
 /data/fidelity/
-/data/fidelity-samples/
 
 # 允许提交 example 和 makesi，其它 slug 的书忽略
 data/books/*
