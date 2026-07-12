@@ -12,9 +12,10 @@ data/audits/
 /data/checklists/
 /data/fidelity/
 
-# 允许提交 example，其它 slug 的书忽略
+# 允许提交 example 和 book，其它 slug 的书忽略
 data/books/*
 !data/books/example
+!data/books/book
 
 # 分页缓存可再生，忽略
 data/books/**/*.pages.json
