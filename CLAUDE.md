@@ -92,6 +92,7 @@ prompts/
 scripts/
   import-mineru.mjs           把 MinerU 输出的 full.md 按"节"切分导入（命令行版，网页上传是它的 UI 化）
   fidelity-audit.mts          Fidelity 审计 CLI 薄壳
+t  sync-to-public.sh           将 master 改动同步到 public，自动剥离内部文件
 
 data/
   books/<slug>/manifest.json + sections/<id>.md（+ <id>.pages.json 分页缓存，.gitignored）
@@ -161,6 +162,39 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 ## V1 明确不做
 
 消息回滚 · 长期学生画像演化 · 多用户 · PDF/EPUB 直接导入（要先转 markdown）· 教师改书 · 全书级 map-reduce 汇总。
+
+## Git 双分支工作流
+
+- **`master`**：私有分支，包含全部内部文档（`_dev/`、`CLAUDE.md`），推到 Gitee (`origin`)
+- **`public`**：公开分支，内部文档已剥离，推到 GitHub (`github`) → `github/main`
+
+### 同步 master → public
+
+```bash
+# 全量合并（在 master 上跑）
+bash scripts/sync-to-public.sh
+
+# 只摘一个 commit
+bash scripts/sync-to-public.sh <hash>
+
+# 摘一段 range
+bash scripts/sync-to-public.sh <a>..<b>
+```
+
+脚本做的事：切到 `public` → merge（或 cherry-pick）→ 自动删掉 `_dev/` 和 `CLAUDE.md` → 提交。
+
+### 推送 public
+
+```bash
+git checkout public
+git push github public:main
+```
+
+### 注意事项
+
+- **不要在 public 上直接改代码**——只通过 sync 脚本从 master 同步
+- **不要在 public 上 `git merge master` 裸跑**——内部文件会被带回来
+- 如果 merge 有冲突，脚本会暂停让你手动解决，回车后继续
 
 ## 沟通风格（沿用旧约定）
 
