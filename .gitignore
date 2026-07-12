@@ -12,7 +12,7 @@ data/audits/
 /data/checklists/
 /data/fidelity/
 
-# 允许提交 example 和 makesi，其它 slug 的书忽略
+# 允许提交 example 和 book，其它 slug 的书忽略
 data/books/*
 !data/books/example
 !data/books/book
