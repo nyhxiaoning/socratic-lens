@@ -6,6 +6,22 @@
 >
 > 当前系统内置了AI为  **七年级上册·教研版** 学生开发的英语书，开箱即测。
 
+## 快速开始
+
+```bash
+npm install                     # 安装依赖（首次必须）
+cp .env.example .env.local      # 创建配置，填入你的 API key
+npx next dev                    # 启动 → http://localhost:3000
+```
+
+`.env.local` 最小配置（支持任意 OpenAI 兼容端点）：
+
+```env
+LLM_BASE_URL=https://api.deepseek.com
+LLM_API_KEY=sk-xxx
+LLM_MODEL=deepseek-v4-flash
+```
+
 ## 推荐
 
 本项目是 Socratopia 的开源审计补充———你把你用AI造的书放socratic-lens 上跑审计，看看书写得怎么样、讲得怎么样，方便你再去调整你的书，让你的想法切实的得到实现。
@@ -26,21 +42,7 @@
 
 ***
 
-## 本项目怎么用
-
-```bash
-npm install
-cp .env.example .env.local   # 填入 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
-npx next dev                  # http://localhost:3000
-```
-
-`.env.local` 最小配置（支持任意 OpenAI 兼容端点）：
-
-```env
-LLM_BASE_URL=https://api.deepseek.com
-LLM_API_KEY=sk-xxx
-LLM_MODEL=deepseek-v4-flash
-```
+## 功能概览
 
 ### 上传书
 
