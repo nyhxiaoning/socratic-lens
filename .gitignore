@@ -25,3 +25,7 @@ data/books/**/*.pages.json
 # 工具本地状态，不入版本控制
 .claude/
 .omo/
+
+# 内部开发文档，不公开
+_dev/
+CLAUDE.md
