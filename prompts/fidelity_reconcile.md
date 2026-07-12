@@ -14,19 +14,30 @@
 
 问的不是「原题原文在不在」，而是「合成节里有没有**等价的、学生能练到**这个点的东西」。有→landed/morphed，没有→dropped。
 
+## 输出格式
+
+每行一条，使用固定格式（不要 JSON、不要 markdown 表格、不要 ``` 围栏）：
+
+```
+ROW|checklistId|category|itemName|status|synthQuote|note
+```
+
+字段说明：
+- `checklistId`：清单条目 id（如 kp1、ac3）
+- `category`：knowledgePoint / criteria / exercise / errorSpot
+- `itemName`：清单条目名称
+- `status`：landed / morphed / dropped
+- `synthQuote`：合成节里的原句（如无则留空）
+- `note`：备注（如无则留空）
+
+最后一行输出总评：
+```
+VERDICT|一句话总评
+```
+
 ## 硬规则
 
 - `synthQuote` 必须是合成节里**逐字**出现的片段（后续会做逐字校验，编造会被标红）。
 - 拿不准落地与否时，倾向 **dropped**——审计宁可多报漏，不可漏报漏。
-- **只输出 JSON**，不要解释、不要代码围栏。结构：
-
-{
-  "rows": [
-    { "checklistId": "kp1", "category": "knowledgePoint", "itemName": "...", "status": "landed", "synthQuote": "..." },
-    { "checklistId": "ex1", "category": "exercise", "itemName": "...", "status": "dropped", "note": "..." }
-  ],
-  "verdict": "一句话总评：这一节保真度够不够，漏的是不是要害。"
-}
-
+- 严格按 ROW|... 格式输出，每行一条，清单里每一条都必须出现一次。
 - category 取值：knowledgePoint / criteria / exercise / errorSpot（与清单条目对应）。
-- 清单里每一条都必须在 rows 里出现一次，用相同的 id 作 checklistId。

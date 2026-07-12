@@ -4,27 +4,35 @@
  * 见 docs/superpowers/specs/2026-07-11-teach-coverage-design.md。
  */
 import path from "node:path";
-import { callLLM } from "./llm";
+import { callLLM, callLLMWithTool } from "./llm";
 import { readText, PROMPTS_ROOT } from "./storage";
 import {
   type Checklist, type Row, type Coverage,
-  parseReconciliation, verifyQuotes, computeCoverage,
+  parseReconciliation, parseReconciliationText, verifyQuotes, computeCoverage,
+  RECONCILE_TOOL,
 } from "./fidelity";
 
-const MAX_LLM_ATTEMPTS = 2;
+const MAX_LLM_ATTEMPTS = 3;
 
 /**
  * 勾稽：清单 + 教学对话 transcript → LLM → Row[]（含 verbatim 校验）+ verdict。
- * 与 fidelity.reconcile() 结构一致但 prompt 换成 coverage_reconcile.md，
- * 目标文本是教学对话而非合成节。
+ *
+ * 双路径：
+ * 1. Tool calling（优先）——所有非 thinking 模型走这条，结构最可靠
+ * 2. 纯文本 ROW|... 格式（降级）——thinking 模型（如 DeepSeek pro）走这条，
+ *    不依赖 JSON/response_format，靠行格式 + 正则解析
  */
 export async function reconcileAgainstTranscript(
   checklist: Checklist,
   transcriptText: string,
+  pacing: string,
   signal: AbortSignal,
 ): Promise<{ rows: Row[]; verdict: string }> {
   const rules = await readText(path.join(PROMPTS_ROOT, "coverage_reconcile.md"));
   const user = [
+    `## 教学节奏`,
+    pacing,
+    ``,
     `## 教学内容清单（JSON）`,
     JSON.stringify(checklist, null, 2),
     ``,
@@ -33,30 +41,57 @@ export async function reconcileAgainstTranscript(
   ].join("\n");
 
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
-    const raw = await callLLM(
-      "audit",
-      [
-        { role: "system", content: rules },
-        { role: "user", content: user },
-      ],
-      { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
-    );
+
+  // —— 路径 1：Tool calling（优先）——
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const retryBanner =
+      attempt > 1
+        ? `\n\n---\n⚠️ 上一步输出不合法。严格按提供的函数 schema 输出。`
+        : "";
     try {
-      const rows = verifyQuotes(parseReconciliation(raw), transcriptText);
-      let verdict = "";
-      try {
-        const o = JSON.parse(raw) as { verdict?: unknown };
-        if (o.verdict != null) verdict = String(o.verdict);
-      } catch {
-        /* verdict 可选 */
-      }
+      const result = await callLLMWithTool(
+        "audit",
+        [
+          { role: "system", content: rules + retryBanner },
+          { role: "user", content: user },
+        ],
+        RECONCILE_TOOL,
+        { temperature: Math.max(0.05, 0.2 - attempt * 0.08), maxTokens: 4000, signal },
+      );
+      const rows = verifyQuotes(parseReconciliation(JSON.stringify(result)), transcriptText);
+      const verdict = String(result.verdict ?? "");
       return { rows, verdict };
     } catch (e) {
       lastErr = e;
       if (signal.aborted) break;
     }
   }
+
+  // —— 路径 2：纯文本行格式（thinking 模型降级）——
+  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+    if (signal.aborted) break;
+    const retryBanner =
+      attempt > 1
+        ? `\n\n---\n⚠️ 上一步输出不符合格式要求。严格按 ROW|... 和 VERDICT|... 格式输出，每行一条。`
+        : "";
+    try {
+      const raw = await callLLM(
+        "audit",
+        [
+          { role: "system", content: rules + retryBanner },
+          { role: "user", content: user },
+        ],
+        { temperature: Math.max(0.1, 0.3 - attempt * 0.1), maxTokens: 4000, signal },
+      );
+      const { rows, verdict } = parseReconciliationText(raw);
+      if (rows.length === 0) throw new Error("未解析到任何 ROW 行");
+      const verified = verifyQuotes(rows, transcriptText);
+      return { rows: verified, verdict };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
   throw new Error(`覆盖度勾稽失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
@@ -66,9 +101,15 @@ export function renderCoverageReportMd(
   coverage: Coverage,
   verdict: string,
   sourceLabel: string,
+  pacing?: string,
 ): string {
   const STATUS_ICON: Record<string, string> = { landed: "✅", morphed: "⚠️", dropped: "❌" };
   const STATUS_LABEL: Record<string, string> = { landed: "落地", morphed: "变形", dropped: "漏" };
+  const PACING_LABEL: Record<string, string> = {
+    thorough: "细（期望全覆盖）",
+    normal: "中（期望知识点+易错点落地）",
+    express: "快（仅知识点必须落地）",
+  };
 
   const nonExercise = rows.filter((r) => r.category !== "exercise");
   const exercises = rows.filter((r) => r.category === "exercise");
@@ -77,6 +118,7 @@ export function renderCoverageReportMd(
   lines.push(`# 教学覆盖度审计报告`);
   lines.push(``);
   lines.push(`> **知识来源**：${sourceLabel}`);
+  if (pacing) lines.push(`> **教学节奏**：${PACING_LABEL[pacing] ?? pacing}`);
   lines.push(``);
   lines.push(`## 总评`);
   lines.push(verdict || "（无）");

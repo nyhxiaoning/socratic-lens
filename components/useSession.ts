@@ -18,10 +18,24 @@ import {
   type AuditEvent,
   type AuditDimension,
   type AuditHistoryItem,
+  type CoverageItem,
+  type CoverageStats,
 } from "@/components/types";
 
-export type Usage = { promptTokens: number; completionTokens: number; costCny: number };
-const ZERO_USAGE: Usage = { promptTokens: 0, completionTokens: 0, costCny: 0 };
+export type Usage = {
+  promptTokens: number;
+  completionTokens: number;
+  costCny: number;
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+};
+const ZERO_USAGE: Usage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  costCny: 0,
+  cacheHitTokens: 0,
+  cacheMissTokens: 0,
+};
 export type WindowInfo = { startPage: number; endPage: number; totalPages: number };
 
 /** 观察台的全部状态与副作用。页面只负责渲染。 */
@@ -30,7 +44,7 @@ export function useSession() {
   const [bookSlug, setBookSlug] = useState<string>("");
   const [book, setBook] = useState<BookDetail | null>(null);
   const [sectionId, setSectionId] = useState<string>("");
-  const [learnerId, setLearnerId] = useState<LearnerId>("novice");
+  const [learnerId, setLearnerId] = useState<LearnerId>("moderate");
   const [pacing, setPacing] = useState<Pacing>("normal");
   const [coachEnabled, setCoachEnabled] = useState<boolean>(true);
   const [learnerCoachEnabled, setLearnerCoachEnabled] = useState<boolean>(true);
@@ -39,7 +53,7 @@ export function useSession() {
   // 批量矩阵生成：同一节 × 多画像 × 多节奏
   const [batchMode, setBatchMode] = useState<boolean>(false);
   const [selectedLearners, setSelectedLearners] = useState<Set<LearnerId>>(
-    new Set<LearnerId>(["novice", "mid", "critic"]),
+    new Set<LearnerId>(["passive", "moderate", "active"]),
   );
   const [selectedPacings, setSelectedPacings] = useState<Set<Pacing>>(
     new Set<Pacing>(["normal"]),
@@ -83,6 +97,10 @@ export function useSession() {
   // 知识点清单缓存
   const [checklistStatus, setChecklistStatus] = useState<Record<string, { exists: boolean; itemCount?: number }>>({});
   const [generatingSections, setGeneratingSections] = useState<Set<string>>(new Set());
+
+  // 实时覆盖度标注
+  const [coverageItems, setCoverageItems] = useState<CoverageItem[]>([]);
+  const [coverageStats, setCoverageStats] = useState<CoverageStats | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const auditAbortRef = useRef<AbortController | null>(null);
@@ -241,10 +259,20 @@ export function useSession() {
           promptTokens: prev.promptTokens + ev.promptTokens,
           completionTokens: prev.completionTokens + ev.completionTokens,
           costCny: prev.costCny + ev.costCny,
+          cacheHitTokens: prev.cacheHitTokens + (ev.cacheHitTokens ?? 0),
+          cacheMissTokens: prev.cacheMissTokens + (ev.cacheMissTokens ?? 0),
         }));
         break;
       case "window_slide":
         setWindowInfo({ startPage: ev.startPage, endPage: ev.endPage, totalPages: ev.totalPages });
+        break;
+      case "coverage_init":
+        setCoverageItems(ev.items);
+        setCoverageStats(null);
+        break;
+      case "coverage_update":
+        setCoverageItems(ev.items);
+        setCoverageStats(ev.stats as CoverageStats);
         break;
       // "done" / "compressed" 静默
     }
@@ -262,6 +290,44 @@ export function useSession() {
     setAuditText("");
     setShowAuditPanel(false);
     setWindowInfo(null);
+    // resume 时不清理覆盖状态——后端会重放历史轮次并通过 coverage_init 推送累积状态
+    if (!resumeSid) {
+      setCoverageItems([]);
+      setCoverageStats(null);
+    }
+
+    // 新会话：如果本节还没有知识点清单，自动生成（用于实时覆盖度标注）
+    if (!resumeSid && bookSlug && sectionId) {
+      try {
+        const cr = await fetch(`/api/checklists?bookSlug=${encodeURIComponent(bookSlug)}`);
+        const cd = await cr.json();
+        const cached = (cd.checklists || []).find(
+          (c: { sectionId: string; exists: boolean }) => c.sectionId === sectionId,
+        );
+        if (!cached?.exists) {
+          setError("正在生成知识点清单…");
+          const gr = await fetch("/api/checklists", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bookSlug, sectionId }),
+          });
+          const gd = await gr.json().catch(() => ({ error: `HTTP ${gr.status}` }));
+          if (!gr.ok) {
+            console.warn("自动生成知识点清单失败:", gd.error);
+          } else {
+            setChecklistStatus((prev) => ({
+              ...prev,
+              [sectionId]: { exists: true, itemCount: gd.itemCount ?? 0 },
+            }));
+          }
+          setError("");
+        }
+      } catch (e) {
+        console.warn("知识点清单预检失败:", e);
+        setError("");
+      }
+    }
+
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -594,8 +660,9 @@ export function useSession() {
     auditText, auditing, showAuditPanel, setShowAuditPanel, existingSessions,
     pickedSids, togglePick, auditRef,
     auditDimension, setAuditDimension, auditHistory, viewAudit,
-    // 知识点清单缓存
+    // 知识点清单缓存 + 实时覆盖度
     checklistStatus, generatingSections, generateChecklist,
+    coverageItems, coverageStats,
     // 历史 / 弹窗
     showHistory, setShowHistory, historyItems, modalSection, setModalSection,
     showUpload, setShowUpload, refreshBooks,

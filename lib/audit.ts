@@ -125,9 +125,9 @@ function formatTranscript(turns: Turn[]): string {
 }
 
 const LEARNER_LABEL: Record<string, string> = {
-  novice: "新手（几乎没有预备知识，多问 why / 求打比方）",
-  mid: "中级（有基础，会复述、会追问细节，容易半懂就以为懂）",
-  critic: "挑刺型（受训的怀疑者，主动找边界与反例）",
+  passive: "冷淡型（不懂且不爱说话，问一句答一句，回复极短）",
+  moderate: "适度型（不懂但愿意学，正常互动，中等篇幅）",
+  active: "话痨型（不懂但热情高，话多主动追问联想，容易跑题）",
 };
 
 /** 每一节的审计素材：本节原文 + 覆盖该节的所有 session transcript。 */
@@ -462,9 +462,10 @@ export async function* runCoverageAudit(
     await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
     yield { type: "audit_start", aid, dimension: "coverage", sids, sampleName };
 
-    // 取第一个会话确定 bookSlug + sectionId
+    // 取第一个会话确定 bookSlug + sectionId + pacing
     const sid = sids[0];
     const sm = await readJson<SessionMeta>(sessionMetaPath(sid));
+    const pacing = sm.pacing ?? "normal";
     const book = await getBook(sm.bookSlug);
     meta.bookSlug = sm.bookSlug;
     meta.sectionIds = [sm.sectionId];
@@ -512,12 +513,12 @@ export async function* runCoverageAudit(
       : transcriptText;
 
     // 3. 勾稽
-    const { rows, verdict: llmVerdict } = await reconcileAgainstTranscript(checklist, reconcileTranscript, signal);
+    const { rows, verdict: llmVerdict } = await reconcileAgainstTranscript(checklist, reconcileTranscript, pacing, signal);
     const coverage = computeCoverage(rows);
     const verdict = llmVerdict || deriveCoverageVerdict(coverage);
 
     // 4. 落盘
-    const reportMd = renderCoverageReportMd(rows, coverage, verdict, sourceLabel);
+    const reportMd = renderCoverageReportMd(rows, coverage, verdict, sourceLabel, pacing);
     const reportJson = { rows, coverage, verdict, sourceLabel };
     await writeAtomic(path.join(auditDir(aid), "report.md"), reportMd);
     await writeAtomic(path.join(auditDir(aid), "report.json"), JSON.stringify(reportJson, null, 2));

@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const maxTurns = Math.min(Math.max(body.maxTurns ?? 8, 1), 200);
+  const maxTurns = Math.min(Math.max(body.maxTurns ?? 8, 0), 200);
   const pacing: Pacing =
     body.pacing === "thorough" || body.pacing === "express" ? body.pacing : "normal";
   const coachEnabled = body.coachEnabled !== false;
@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
         for await (const event of runSession({
           bookSlug: body.bookSlug ?? "",
           sectionId: body.sectionId ?? "",
-          learnerId: body.learnerId ?? "novice",
+          learnerId: body.learnerId ?? "moderate",
           pacing,
           coachEnabled,
           learnerCoachEnabled,

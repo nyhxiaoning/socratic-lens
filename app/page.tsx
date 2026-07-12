@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Modal } from "@/components/Modal";
 import { ChatView } from "@/components/ChatView";
 import { CoachSidebar } from "@/components/CoachSidebar";
+import { CoverageSidebar } from "@/components/CoverageSidebar";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
 import { UploadBook } from "@/components/UploadBook";
 import { AuditPicker, AuditView } from "@/components/AuditPanel";
@@ -14,6 +15,7 @@ import type { BookSummary } from "@/components/types";
 export default function Page() {
   const s = useSession();
   const [showCoach, setShowCoach] = useState<boolean>(true);
+  const [showCoverage, setShowCoverage] = useState<boolean>(true);
   const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
 
   const showSidebar =
@@ -22,6 +24,8 @@ export default function Page() {
       s.learnerCoachEnabled ||
       s.coachHistory.length > 0 ||
       s.learnerCoachHistory.length > 0);
+
+  const showCoverageSidebar = showCoverage && s.coverageItems.length > 0;
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
@@ -155,7 +159,11 @@ export default function Page() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: showSidebar ? "1fr 320px" : "1fr",
+          gridTemplateColumns: [
+            "1fr",
+            showSidebar ? "320px" : null,
+            showCoverageSidebar ? "280px" : null,
+          ].filter(Boolean).join(" "),
           gap: 12,
           height: "calc(100vh - 280px)",
           minHeight: 300,
@@ -178,12 +186,28 @@ export default function Page() {
           coachHistory={s.coachHistory}
           learnerCoachHistory={s.learnerCoachHistory}
         />
+
+        <CoverageSidebar
+          visible={showCoverageSidebar}
+          items={s.coverageItems}
+          stats={s.coverageStats}
+          onCollapse={() => setShowCoverage(false)}
+        />
+
         {(s.coachEnabled || s.learnerCoachEnabled) && !showCoach && (
           <button
             onClick={() => setShowCoach(true)}
             style={{ position: "absolute", right: 20, top: 210, fontSize: 11, padding: "2px 8px" }}
           >
             显示教练
+          </button>
+        )}
+        {s.coverageItems.length > 0 && !showCoverage && (
+          <button
+            onClick={() => setShowCoverage(true)}
+            style={{ position: "absolute", right: showSidebar ? 340 : 20, top: 210, fontSize: 11, padding: "2px 8px" }}
+          >
+            显示覆盖
           </button>
         )}
       </div>
@@ -212,8 +236,14 @@ export default function Page() {
           )}
           {s.usage.promptTokens > 0 && (
             <span title="本次会话累计 token 用量与估算成本">
-              {" · "}in: {s.usage.promptTokens} · out: {s.usage.completionTokens} · ¥{" "}
-              {s.usage.costCny.toFixed(4)}
+              {" · "}in: {s.usage.promptTokens} · out: {s.usage.completionTokens}
+              {s.usage.cacheHitTokens > 0 && (
+                <> · 🟢缓存命中: {s.usage.cacheHitTokens}</>
+              )}
+              {s.usage.cacheMissTokens > 0 && (
+                <> · 🔴缓存未命中: {s.usage.cacheMissTokens}</>
+              )}
+              {" · "}¥{s.usage.costCny.toFixed(4)}
             </span>
           )}
         </span>

@@ -10,6 +10,10 @@ export type LLMUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** DeepSeek 上下文硬盘缓存命中 token 数 */
+  cacheHitTokens?: number;
+  /** DeepSeek 上下文硬盘缓存未命中 token 数 */
+  cacheMissTokens?: number;
 };
 
 export type LLMOptions = {
@@ -21,6 +25,16 @@ export type LLMOptions = {
   jsonMode?: boolean;
   /** 拿到 usage 时的回调（不是所有 provider 都会给；给了才调）。 */
   onUsage?: (u: LLMUsage) => void;
+};
+
+/**
+ * 强制 tool calling 的定义。传入后 callLLMWithTool 使用 tools + tool_choice=required，
+ * 比 jsonMode 稳定得多（几乎所有模型都支持 tool calling，包括 DeepSeek）。
+ */
+export type ToolDef = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
 };
 
 function requireEnv(key: string): string {
@@ -56,6 +70,17 @@ export function getClient(purpose: Purpose): OpenAI {
   return client;
 }
 
+/** 从 OpenAI 兼容 usage 对象提取用量（含 DeepSeek 缓存命中字段）。 */
+function extractUsage(u: Record<string, unknown> | undefined): LLMUsage | undefined {
+  if (!u) return undefined;
+  const promptTokens = (u.prompt_tokens as number) ?? 0;
+  const completionTokens = (u.completion_tokens as number) ?? 0;
+  const totalTokens = (u.total_tokens as number) ?? 0;
+  const cacheHitTokens = u.prompt_cache_hit_tokens as number | undefined;
+  const cacheMissTokens = u.prompt_cache_miss_tokens as number | undefined;
+  return { promptTokens, completionTokens, totalTokens, cacheHitTokens, cacheMissTokens };
+}
+
 function logCall(
   purpose: Purpose,
   model: string,
@@ -79,6 +104,8 @@ function logCall(
             promptTokens: usage.promptTokens,
             completionTokens: usage.completionTokens,
             totalTokens: usage.totalTokens,
+            ...(usage.cacheHitTokens != null ? { cacheHitTokens: usage.cacheHitTokens } : {}),
+            ...(usage.cacheMissTokens != null ? { cacheMissTokens: usage.cacheMissTokens } : {}),
           }
         : {}),
     }),
@@ -112,6 +139,10 @@ export function callLLM(
   const t0 = Date.now();
 
   const sdkMessages = messages as ChatCompletionMessageParam[];
+  // DeepSeek 模型默认关闭 thinking（教学/审计场景不需要扩展推理，浪费 token 且破坏结构化输出）
+  const extraBody: Record<string, unknown> = /deepseek/i.test(model)
+    ? { thinking: { type: "disabled" } }
+    : {};
 
   if (opts.stream) {
     return (async function* () {
@@ -122,10 +153,10 @@ export function callLLM(
           model,
           messages: sdkMessages,
           stream: true,
-          // 让流的最后一个 chunk 带 usage（OpenAI 兼容参数）
           stream_options: { include_usage: true },
           max_tokens: opts.maxTokens,
           temperature: opts.temperature,
+          ...extraBody,
         },
         { signal: opts.signal },
       );
@@ -138,13 +169,7 @@ export function callLLM(
           }
           // 最后一个 chunk 通常 choices=[]，usage 在这里
           const u = chunk.usage;
-          if (u) {
-            usage = {
-              promptTokens: u.prompt_tokens ?? 0,
-              completionTokens: u.completion_tokens ?? 0,
-              totalTokens: u.total_tokens ?? 0,
-            };
-          }
+          if (u) usage = extractUsage(u as unknown as Record<string, unknown>);
         }
       } finally {
         if (usage && opts.onUsage) opts.onUsage(usage);
@@ -165,20 +190,133 @@ export function callLLM(
         max_tokens: opts.maxTokens,
         temperature: opts.temperature,
         response_format: opts.jsonMode && !skipJsonResp ? { type: "json_object" } : undefined,
+        ...extraBody,
       },
       { signal: opts.signal },
     );
     const text = resp.choices?.[0]?.message?.content ?? "";
-    let usage: LLMUsage | undefined;
-    if (resp.usage) {
-      usage = {
-        promptTokens: resp.usage.prompt_tokens ?? 0,
-        completionTokens: resp.usage.completion_tokens ?? 0,
-        totalTokens: resp.usage.total_tokens ?? 0,
-      };
-      if (opts.onUsage) opts.onUsage(usage);
-    }
+    const usage = extractUsage(resp.usage as unknown as Record<string, unknown> | undefined);
+    if (usage && opts.onUsage) opts.onUsage(usage);
     logCall(purpose, model, messages.length, inputChars, text.length, Date.now() - t0, usage);
     return text;
   })();
+}
+
+/**
+ * 使用 tool calling 强制结构化输出。
+ * 比 jsonMode 稳定：几乎所有 OpenAI 兼容模型都支持 tool calling（包括 DeepSeek），
+ * 且 tool_choice=required 强制模型调用函数，返回的 arguments 天然是合法 JSON。
+ *
+ * 自动回退：如果模型不支持 tool_choice=required（如 DeepSeek 的 thinking mode），
+ * 降级为无 tool_choice 的 tools；再失败则走 jsonMode 兜底。
+ *
+ * 返回解析后的 arguments 对象（已 JSON.parse）。失败抛错。
+ */
+export async function callLLMWithTool(
+  purpose: Purpose,
+  messages: LLMMessage[],
+  tool: ToolDef,
+  opts: LLMOptions = {},
+): Promise<Record<string, unknown>> {
+  const client = getClient(purpose);
+  const model = pickModel(purpose);
+  const inputChars = messages.reduce((s, m) => s + m.content.length, 0);
+  const t0 = Date.now();
+
+  const toolDef = {
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters as Record<string, unknown>,
+    },
+  };
+
+  const extraBody: Record<string, unknown> = /deepseek/i.test(model)
+    ? { thinking: { type: "disabled" } }
+    : {};
+
+  // 尝试顺序：
+  // Tier 1: tool_choice="required"（最可靠，但 thinking mode 不支持）
+  // Tier 2: 只有 tools，无 tool_choice（靠 prompt 和 schema 引导）
+  // Tier 3: jsonMode 纯文本（DeepSeek flash 也可能失败，但已走 parseJsonLoose）
+  const tiers: Array<{ tool_choice?: "required"; tools?: typeof toolDef[] }> = [
+    { tool_choice: "required", tools: [toolDef] },
+    { tools: [toolDef] },                         // 无 tool_choice 降级
+    {},                                            // jsonMode 兜底
+  ];
+
+  let lastErr: unknown;
+  for (const tier of tiers) {
+    try {
+      const resp = await client.chat.completions.create(
+        {
+          model,
+          messages: messages as ChatCompletionMessageParam[],
+          stream: false,
+          max_tokens: opts.maxTokens,
+          temperature: opts.temperature,
+          ...(tier.tools ? { tools: tier.tools } : {}),
+          ...(tier.tool_choice ? { tool_choice: tier.tool_choice } : {}),
+          ...(tier.tools === undefined
+            ? { response_format: /deepseek/i.test(model) ? undefined : { type: "json_object" as const } }
+            : {}),
+          ...extraBody,
+        },
+        { signal: opts.signal },
+      );
+
+      const choice = resp.choices?.[0];
+      const toolCall = choice?.message?.tool_calls?.[0];
+      const content = choice?.message?.content ?? "";
+      const rawArgs = toolCall?.function?.arguments ?? "";
+
+      const usage = extractUsage(resp.usage as unknown as Record<string, unknown> | undefined);
+      if (usage && opts.onUsage) opts.onUsage(usage);
+      logCall(purpose, model, messages.length, inputChars, rawArgs.length, Date.now() - t0, usage);
+
+      // 优先解析 tool call arguments
+      if (rawArgs) {
+        try {
+          return JSON.parse(rawArgs) as Record<string, unknown>;
+        } catch {
+          // arguments 解析失败，继续尝试 content
+        }
+      }
+
+      // 降级：从 message content 解析 JSON
+      if (content) {
+        // 复用 parseJsonLoose 的容错逻辑
+        try {
+          return JSON.parse(content) as Record<string, unknown>;
+        } catch { /* fallthrough */ }
+        // 剥 <think> 和 ```json``` 围栏
+        let s = content.trim();
+        s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+        const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fence) s = fence[1].trim();
+        const first = s.indexOf("{");
+        const last = s.lastIndexOf("}");
+        if (first !== -1 && last > first) s = s.slice(first, last + 1);
+        try {
+          return JSON.parse(s) as Record<string, unknown>;
+        } catch { /* fallthrough */ }
+      }
+
+      throw new Error("无可用输出");
+    } catch (e) {
+      lastErr = e;
+      // 400 错误跳过当前 tier（模型不支持），其他错误直接抛
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("400") && msg.includes("tool_choice")) continue;
+      // 非 400 的其他服务端错误也尝试降级
+      if (msg.includes("400") || msg.includes("500") || msg.includes("503")) continue;
+      throw e;
+    }
+  }
+
+  throw new Error(
+    `callLLMWithTool 全部降级失败（模型 "${model}"）：` +
+    `${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  );
 }
