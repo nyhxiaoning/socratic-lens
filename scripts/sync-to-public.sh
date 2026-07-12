@@ -47,9 +47,9 @@ if [ $# -eq 0 ]; then
     # 自动解决内部文件的 modify/delete 冲突（public 删了、master 改了）
     # 内部文件在 public 上就该不存在，直接 git rm 即可
     for f in "${INTERNAL_FILES[@]}"; do
-      if git diff --name-only --diff-filter=U 2>/dev/null | grep -qx "$f"; then
+      if git diff --name-only --diff-filter=U 2>/dev/null | grep -q "^${f}"; then
         echo "🔧 auto-resolve internal file conflict (remove): $f"
-        git rm "$f" 2>/dev/null || true
+        git rm -r --cached "$f" 2>/dev/null || git rm --cached "$f" 2>/dev/null || true
       fi
     done
     # 检查是否还有未解决的冲突
