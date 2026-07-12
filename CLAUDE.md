@@ -7,15 +7,17 @@
 一个 Socratopia 风格的"教-学-审"多 agent 试验台，用来审计用户自己写的书。
 
 - **教师 agent**：拿到一本书的某一节的原文，扮演苏格拉底式老师给学生讲。
-- **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`novice` / `mid` / `critic`）轮询。
+- **学生 agent**：**看不到原文**，只从老师的话里学；三种画像（`passive` / `moderate` / `active`）按积极程度划分。
 - **教师教练 TAE**（§3.4）：每轮末尾后台跑一次 JSON 分析，注入下一轮教师 system prompt。默认开。
 - **学生教练**：结构镜像教师教练，判断学生"是不是真懂 / 有没有用预训练作弊 / 画像有没有漂"，注入下一轮学生 system prompt。默认开。
-- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。**两个维度**（`POST /api/audits { sids, dimension }`）：
-  - `book`（审书本身，默认）：5 段 `===TAG===` 协议 VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS。VERDICT 要判**问题层级**（局部可补 vs 结构性/体裁性需整体改造成蓝本），CLARITY 每条标**三级严重度**（🔴会教错 / 🟠误导 / 🟡瑕疵），SUGGESTIONS 分"局部修补 / 结构性改造"两组。规则 `prompts/audit_rules.md`。
-  - `teacher`（审教师教学质量，产出面向更新教师约束）：VERDICT / METHOD / PERSONA_FIT / RULE_VIOLATIONS / RULE_SUGGESTIONS。规则 `prompts/audit_teacher_rules.md`。
-  - 落盘 `data/audits/<aid>/report.md` + meta（含 `dimension`）；全局索引 `data/audits/history.jsonl`。UI 审计面板顶部切维度，并列出本书**审计历史**可回看。
+- **审计 agent**：会话结束后手动触发。**支持跨多个 session 合审**——比如同一节跑了三种学生画像 → 合审看差异；同一章三节各跑一次 → 合审看整章讲得清不清。**四个维度**（`POST /api/audits { sids, dimension }`）：
+  - `book`（审书本身，默认）：5 段 `===TAG===` 协议 VERDICT / CLARITY / HARD_SPOTS / INCONSISTENCY / SUGGESTIONS。规则 `prompts/audit_rules.md`。
+  - `teacher`（审教师教学质量）：VERDICT / METHOD / PERSONA_FIT / RULE_VIOLATIONS / RULE_SUGGESTIONS。规则 `prompts/audit_teacher_rules.md`。
+  - `fidelity`（保真度，审合成节 vs 源材料）：清单抽提 → 逐条勾稽 → 覆盖率报告。规则 `prompts/fidelity_extract.md` + `prompts/fidelity_reconcile.md`。
+  - `coverage`（教学覆盖度，审对话 vs 书本/源材料）：清单缓存 → 逐条勾稽 transcript → 覆盖率报告，支持 pacing 感知判据。规则 `prompts/coverage_reconcile.md`。
+  - 落盘 `data/audits/<aid>/report.md` + `report.json` + `checklist.json` + meta（含 `dimension`）；全局索引 `data/audits/history.jsonl`。
 
-**长会话支持**：轮数最高 120。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
+**长会话支持**：轮数最高 200。可选「直到本节结束」——讲完自动停。每轮结束时若"未压缩对话"超过阈值（~12k 字符）就把老对话压成 lesson_summary 存到 meta 里，教师侧 60k 字符预算、学生侧 40k。参考 §10.2。
 
 **自适应翻页**（§5.4）：如果一节原文 > 12k 字符，会切成 ~2k 字符/页；教师初始只看头 3-4 页（约 8k 字符窗口）；每轮教练判断 `contentProgress`（first_half / second_half / done），连续 2 次非 first_half 就自动翻页（保留 2 页重叠 + 追加新页至预算，末页守恒）。`data/sessions/<sid>/meta.json` 里 `windowStartPage/endPage` 全程可 resume。
 
@@ -52,7 +54,7 @@ app/
   api/audits/[aid]/route.ts         GET 单次审计的 meta + 报告
 
 lib/
-  llm.ts       唯一 callLLM(purpose, messages, opts) 入口（含 jsonMode + usage 回调）
+  llm.ts       唯一 callLLM / callLLMWithTool 入口（含 jsonMode / tool calling / usage 回调 / DeepSeek thinking 关闭）
   pricing.ts   按 .env 价格把 token 用量换算人民币
   book.ts      Book/Section 读取 + 每节字数统计 + 分页缓存
   parse-book.ts 纯函数：整本 md 按节切分（前端预览 + 后端落盘共用，无 node 依赖）
@@ -62,26 +64,34 @@ lib/
   teacher.ts   教师 system prompt 组装（含 pacing + 教练分析注入 + 分页窗口）
   learner.ts   学生 system prompt 组装（含学生教练分析注入）
   coach.ts     教师教练 + 学生教练：analyze* / render*Block
-  session.ts   会话循环 + 教师首句强制 + 滑动摘要 + 双教练并行 + 自适应翻页 + resume + reconcile
-  audit.ts     跨 sids 收集素材 + 一次 LLM 出报告 + 双维度 ===TAG=== 解析 + 落盘 + 审计历史
+  session.ts   会话循环 + 教师首句强制 + 滑动摘要 + 双教练并行 + 自适应翻页 + auto-stop + resume + reconcile
+  audit.ts     book/teacher/fidelity/coverage 四维度审计 + 落盘 + 历史
+  fidelity.ts  Checklist 抽提 + 勾稽 reconciliation（纯文本/tool calling 双路径）+ 覆盖率计算
+  coverage.ts  教学覆盖度勾稽 reconcileAgainstTranscript（对接 coverage_reconcile.md）
+  coverage-tracker.ts 实时覆盖度追踪（教师引用 vs 清单 sourceQuote，零 LLM 成本）
+  checklist.ts 知识点清单缓存读写（data/checklists/）
   storage.ts   fs 小工具（原子写、追加行、目录初始化）
   sse.ts       前端 readSse：逐帧 JSON.parse SSE 响应
 
 components/    page.tsx 拆出的 UI + useSession hook
-  useSession.ts（整套会话/批量/审计状态与副作用）· types.ts（共享类型）
-  Controls.tsx · ChatView.tsx · CoachSidebar.tsx · AuditPanel.tsx
-  HistoryDrawer.tsx · UploadBook.tsx · Modal.tsx · Field.tsx
+  useSession.ts（整套会话/批量/审计/覆盖度状态与副作用）· types.ts（共享类型）
+  Controls.tsx · ChatView.tsx · CoachSidebar.tsx · CoverageSidebar.tsx
+  AuditPanel.tsx · HistoryDrawer.tsx · UploadBook.tsx · Modal.tsx · Field.tsx
 
 prompts/
   teacher_rules.md
-  learner_novice.md / learner_mid.md / learner_critic.md
+  learner_passive.md / learner_moderate.md / learner_active.md（按积极程度分档）
   coach_rules.md              教师教练 JSON schema
   learner_coach_rules.md      学生教练 JSON schema
   audit_rules.md              审书维度（5 段 + 问题层级 + 三级严重度）
   audit_teacher_rules.md      审教师教学质量维度（5 段）
+  fidelity_extract.md         保真度/覆盖度：从源材料抽知识点清单
+  fidelity_reconcile.md       保真度：清单 vs 合成节 逐条勾稽
+  coverage_reconcile.md       覆盖度：清单 vs 教学对话 逐条勾稽（含 pacing 感知判据）
 
 scripts/
-  import-mineru.mjs                 把 MinerU 输出的 full.md 按"节"切分导入（命令行版，网页上传是它的 UI 化）
+  import-mineru.mjs           把 MinerU 输出的 full.md 按"节"切分导入（命令行版，网页上传是它的 UI 化）
+  fidelity-audit.mts          Fidelity 审计 CLI 薄壳
 
 data/
   books/<slug>/manifest.json + sections/<id>.md（+ <id>.pages.json 分页缓存，.gitignored）
@@ -92,8 +102,12 @@ data/
     usage.jsonl                     (每轮各 callLLM 的 token 用量与成本)
     citations.jsonl                 (教师每轮引用的 verbatim 校验结果)
                                                              （data/sessions .gitignored）
-  audits/<aid>/meta.json + report.md                         （.gitignored）
+  audits/<aid>/meta.json + report.md + report.json + checklist.json （.gitignored）
   audits/history.jsonl                                       （.gitignored 全局审计索引，含 dimension）
+  checklists/<slug>/<sectionId>.json                          （.gitignored 知识点清单缓存）
+  fidelity/<fid>/...                                         （.gitignored 保真度审计结果）
+
+_dev/           内部开发文档（设计笔记、测试、其他书、旧 prompt、Git 工作流备忘）
 ```
 
 只有 `data/books/example/` 提交入库，其它 slug 在 `.gitignore` 里。
@@ -104,7 +118,7 @@ data/
 2. **独立上下文**：教师和学生**各维护 messages 数组**，绝不共享。构造方向相反：教师 messages 里 `learner→user`，学生 messages 里 `teacher→user`。
 3. **文件即记忆**（§10.1）：书、rules、画像都是 md 文件，system prompt 组装时整份读入。不引 RAG、不引向量库。
 4. **拼接式 prompt**：段落间用 `\n\n---\n\n` 分隔（§10.1）。教师 8 段，学生 5 段。
-5. **本节原文只喂教师**：学生看不到——学生的困惑就是这本书的困惑。这是"用 agent 审书"的核心。
+5. **本节原文只喂教师**：学生看不到。学生的提问逼出教师回答的覆盖缺口——漏洞是真的，与困惑真假无关。
 6. **引用协议 `〔§<id>｜前若干字〕`**：仅从 §3.1 里保留这一条结构化约束。服务端做 verbatim 逐字校验（`lib/citations.ts`）：教师每轮引用比对本节原文，命中/未命中落 `citations.jsonl`，未命中在 ChatView 里红边 + ⚠️，命中率注入 audit 的 INCONSISTENCY 段。
 7. **transcript.jsonl 一行一 turn**：`{turn, actor, text, ts}`。V2 审计 agent 直接吃这个文件。
 
@@ -146,7 +160,7 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 
 ## V1 明确不做
 
-消息回滚 · 长期学生画像演化 · 多用户 · PDF/EPUB 直接导入（要先转 markdown）· 教师改书 · 全书级 map-reduce 审计（批量生成已做，reduce 汇总未做）。
+消息回滚 · 长期学生画像演化 · 多用户 · PDF/EPUB 直接导入（要先转 markdown）· 教师改书 · 全书级 map-reduce 汇总。
 
 ## 沟通风格（沿用旧约定）
 
