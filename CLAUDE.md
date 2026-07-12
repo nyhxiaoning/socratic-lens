@@ -133,7 +133,7 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 按 `## 导论` / `## 第X章` / `## 第X节` 边界切分成 sections，删掉图片引用和营销广告。（网页上传就是这个脚本的 UI 化，切节逻辑同源于 `lib/parse-book.ts`。）
 
 **手动加书**：
-1. 在 `data/books/<你的-slug>/` 下建目录（`.gitignore` 默认只提交 `example` 和 `makesi`，其它 slug 在本地跑就好）
+1. 在 `data/books/<你的-slug>/` 下建目录（`.gitignore` 默认只提交 `example`，其它 slug 在本地跑就好）
 2. 写 `manifest.json`：
    ```json
    {
@@ -156,7 +156,7 @@ node scripts/import-mineru.mjs <full.md 路径> <slug> [title] [author]
 
 ## 相关文档
 
-- `PLAN.md` — 本项目 V1 完整设计方案（跟这份 CLAUDE.md 对齐）
-- `REVERSE-ENGINEERING-REPORT.md` — Socratopia 71 KB 逆向报告，本项目所有"借鉴自 Socratopia"的模式都来自这里
-- `AI-DRIVEN-DEVELOPMENT-INSIGHTS.md` — 方法论姊妹篇
-- `CONVERSATION-CONTEXT.md` — 旧的 Socratopia 逆向讨论快照（**与本项目无关**）
+- `_dev/PLAN.md` — 本项目 V1 完整设计方案（跟这份 CLAUDE.md 对齐）
+- `_dev/REVERSE-ENGINEERING-REPORT.md` — Socratopia 71 KB 逆向报告
+- `_dev/AI-DRIVEN-DEVELOPMENT-INSIGHTS.md` — 方法论姊妹篇
+- `_dev/GIT-WORKFLOW.md` — Git 双分支工作流备忘
