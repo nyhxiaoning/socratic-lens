@@ -27,5 +27,7 @@ data/books/**/*.pages.json
 .omo/
 
 # 内部开发文档，不公开
+
 _dev/
+
 CLAUDE.md
