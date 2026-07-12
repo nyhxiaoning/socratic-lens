@@ -125,7 +125,7 @@ export function CoverageSidebar({ visible, items, stats, onCollapse }: Props) {
 
       {items.length === 0 && (
         <div style={{ color: "var(--muted)", fontSize: 12, textAlign: "center", padding: 20 }}>
-          本节尚未生成知识点清单。请先在审计面板 → 教学覆盖度 → 生成知识点清单。
+          点击开始自动分析知识点
         </div>
       )}
     </div>

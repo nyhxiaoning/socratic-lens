@@ -1,8 +1,32 @@
-# Socratopia — 教·学·审 多 Agent 试验台
+# [socratic-lens](https://github.com/xx-hub/socratic-lens)— 教·学·审 多 Agent 试验台
 
-一个 Socratopia 风格的"教学-审计"系统：**教师 agent** 按苏格拉底式教学法一对一讲课，**学生 agent**（三种画像）只能从教师的话里学，**审计 agent** 跨会话评估教学质量和内容覆盖。
+> 本项目是[Socratopia](https://www.socratopia.app/zh) 的衍生项目，是帮助各位对自己利用AI造的书进行审计的。
+>
+> Socratopia——苏格拉底式情境学习系统，苏格拉底教学法有着举世公认的奇效，但它始终无法推广，因为它要求一对一教学。没有哪个课堂，能为每一个学生持续提供这样的环境。但 AI 可以。
+>
+> 当前系统内置了AI为  **七年级上册·教研版** 学生开发的英语书，开箱即测。
 
-## 快速开始
+## 推荐
+
+本项目是 Socratopia 的开源审计补充———你把你用AI造的书放socratic-lens 上跑审计，看看书写得怎么样、讲得怎么样，方便你再去调整你的书，让你的想法切实的得到实现。
+
+对于自己造的书，开发者推荐大家使用 Scotopia 官方学习工具：[Socratopia — AI-Powered Socratic Learning](https://www.socratopia.app/zh)。
+
+[Socratopia](https://www.socratopia.app/zh)能做什么：
+
+- **AI 教师一对一苏格拉底式讲课**——上传你的书，AI 教师逐节讲解，学生在AI老师的引导下学习，老师依靠大模型能力可以解决传统学习过程中老师备课不足的问题，也可以解决学生对任一知识点反复学不会造成的教学时间过长的问题。
+- **多种课堂风格**——从对基础弱的同学细致的讲解到对学霸同学快速的预、复习，教学风格根据学生的需要调整
+- **多种教师风格**——从话痨型唐僧教师到活泼开朗的大师兄型教师，只有你想不到，没有[Socratopia](https://www.socratopia.app/zh)做不到的。
+
+输入邀请码：SCR-FEJXMQ
+
+· 免费用户 → 立即获得 100万 Token
+
+· 坐馆订阅用户 → 获得 1 书币（价值 $3.99）
+
+***
+
+## 本项目怎么用
 
 ```bash
 npm install
@@ -10,7 +34,7 @@ cp .env.example .env.local   # 填入 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
 npx next dev                  # http://localhost:3000
 ```
 
-`.env.local` 最小配置：
+`.env.local` 最小配置（支持任意 OpenAI 兼容端点）：
 
 ```env
 LLM_BASE_URL=https://api.deepseek.com
@@ -18,73 +42,32 @@ LLM_API_KEY=sk-xxx
 LLM_MODEL=deepseek-v4-flash
 ```
 
-支持任意 OpenAI 兼容端点（DeepSeek、火山方舟、OpenAI 官方等）。可选按 purpose 分模型：`LLM_MODEL_TEACHER` / `LLM_MODEL_LEARNER` / `LLM_MODEL_COACH` / `LLM_MODEL_AUDIT`。
+### 上传书
 
-## 使用
+顶栏「上传书…」→ 选 `.md` 文件或粘贴 markdown → 预览切节 → 导入。按 `## 导论 / 第X章 / 第X节` 自动切。
 
-### 1. 上传一本书
+### 跑教学
 
-观察页顶栏「上传书…」→ 选 `.md` 文件或粘贴 markdown → 预览自动切节 → 导入。
+选书 → 选节 → 选学生画像 → 开始。实时 SSE 流输出。学生看不到原文，只能从教师的话里学。
 
-书的结构：`## 导论` / `## 第X章` / `## 第X节` 三级标题自动切。也可手动放到 `data/books/<slug>/`：
+三种学生画像：`passive`（冷淡）、`moderate`（适度）、`active`（话痨）。
 
-```
-data/books/<slug>/
-  manifest.json          # { "title": "...", "author": "...", "sections": [...] }
-  sections/
-    01.md
-    02.md
-```
+支持矩阵式跑，以三种教学风格叠加三种学生画像，共九种课堂一键测试。
 
-参考 `data/books/example/`。
+### 审计
 
-### 2. 跑一堂教学会话
+会话跑完后，审计面板勾选会话 → 选维度 → 运行。支持跨会话合审。
 
-选书 → 选节 → 选学生画像（冷淡 / 适度 / 话痨）→ 选节奏 → 开始。
+四个维度：`book`（审书）、`teacher`（审教学）、`fidelity`（保真度勾稽）、`coverage`（覆盖度勾稽）。
 
-教师和学生各自独立上下文（学生看不到原文），实时 SSE 流输出。每轮末尾双教练并行分析，注入下一轮 system prompt。支持最多 200 轮、自适应翻页、中途 resume。
+总的来说，知识点覆盖不到的、教师讲不到的，都是你的书需要调整的。
 
-### 3. 审计
+## 界面大概长这样：
 
-会话结束后，在审计面板勾选一个或多个会话 → 选维度 → 运行。
+![screenshot](image/README/image.png)
 
-四个审计维度：
+其他功能正在开发中，需要自备大模型的key。
 
-| 维度 | 审什么 |
-|---|---|
-| `book` | 审书本身——概念清晰度、硬点、矛盾、改进建议 |
-| `teacher` | 审教师——教法、画像匹配、规则违规 |
-| `fidelity` | 保真度——合成教学 vs 源材料，逐条勾稽 |
-| `coverage` | 覆盖度——对话覆盖了多少知识点/评价标准/易错点 |
-
-支持**跨会话合审**——比如同一节三种学生画像合起来看差异。
-
-## 三种学生画像
-
-| 画像 | 积极性 | 典型行为 |
-|---|---|---|
-| 冷淡型 (`passive`) | 很低 | 问一句答一句，几乎不主动提问 |
-| 适度型 (`moderate`) | 中等 | 不懂就问，懂了正常回应 |
-| 话痨型 (`active`) | 很高 | 兴奋、话多、敢猜敢联想，容易跑题 |
-
-## 目录
-
-```
-app/           Next.js App Router（观察页 + API）
-lib/           核心逻辑（llm / session / teacher / learner / coach / audit / fidelity / coverage）
-components/    React 组件
-prompts/       System prompt 模板（teacher / learner 画像 / coach / audit）
-scripts/       工具脚本
-data/books/    书（本地文件，不提交到 git）
-```
-
-## 设计要点
-
-- **文件即记忆**——书、prompt、会话全部落盘为文件，不依赖数据库
-- **唯一 LLM 入口** `lib/llm.ts`——所有 provider 切换、日志、计费统一管理
-- **独立上下文**——教师和学生各自维护独立的 messages 数组，方向相反
-- **引用协议** `〔§id｜片段〕`——教师引用原文时带标记，自动做逐字校验
-
-## License
+***
 
 MIT

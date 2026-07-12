@@ -186,6 +186,22 @@ export function useSession() {
     } else {
       setWindowInfo(null);
     }
+    // 恢复知识点覆盖状态
+    if (d.coverage && Array.isArray(d.coverage)) {
+      const items = d.coverage as CoverageItem[];
+      setCoverageItems(items);
+      const total = items.length;
+      const covered = items.filter((i) => i.status === "covered").length;
+      const byCategory = new Map<string, { total: number; covered: number }>();
+      for (const cat of ["knowledgePoint", "criteria", "exercise", "errorSpot"]) {
+        const catItems = items.filter((i) => i.category === cat);
+        byCategory.set(cat, { total: catItems.length, covered: catItems.filter((i) => i.status === "covered").length });
+      }
+      setCoverageStats({ total, covered, byCategory });
+    } else {
+      setCoverageItems([]);
+      setCoverageStats(null);
+    }
   }
 
   /** 把某个已有会话载入到对话栏，只读，不起新流。 */

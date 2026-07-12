@@ -14,7 +14,7 @@ import type { BookSummary } from "@/components/types";
 
 export default function Page() {
   const s = useSession();
-  const [showCoach, setShowCoach] = useState<boolean>(true);
+  const [showCoach, setShowCoach] = useState<boolean>(false);
   const [showCoverage, setShowCoverage] = useState<boolean>(true);
   const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
 
@@ -25,14 +25,14 @@ export default function Page() {
       s.coachHistory.length > 0 ||
       s.learnerCoachHistory.length > 0);
 
-  const showCoverageSidebar = showCoverage && s.coverageItems.length > 0;
+  const showCoverageSidebar = showCoverage;
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
       <header style={{ marginBottom: 12 }}>
-        <h1 style={{ margin: 0, fontSize: 18 }}>教-学 agent 观察台</h1>
+        <h1 style={{ margin: 0, fontSize: 18 }}>教·学·审 观察台</h1>
         <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>
-          教师看得到本节原文，学生看不到——学生的困惑就是这本书的困惑。
+          知识点覆盖不到的，教师讲不到的，都是你的书需要调整的。
         </p>
       </header>
 

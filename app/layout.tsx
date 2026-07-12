@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "书本审计 · 教-学 agent 观察台",
+  title: "教·学·审 观察台",
   description: "两个 agent 对着你的书上课，你在旁边看",
 };
 

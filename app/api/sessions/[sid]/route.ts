@@ -55,6 +55,14 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     { promptTokens: 0, completionTokens: 0, costCny: 0 },
   );
 
+  // 知识点覆盖数据（实时追踪快照）
+  let coverage: { items: unknown[]; stats: unknown } | null = null;
+  try {
+    coverage = await readJson(path.join(dir, "coverage.json"));
+  } catch {
+    // coverage.json 可能不存在（老会话或会话尚未结束）
+  }
+
   return NextResponse.json({
     meta,
     turns,
@@ -63,5 +71,6 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     usage,
     usageSummary,
     citations,
+    coverage,
   });
 }
