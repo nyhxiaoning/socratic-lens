@@ -38,12 +38,20 @@ if [ $# -eq 0 ]; then
   if git merge master --no-commit --no-ff -X theirs 2>&1; then
     echo "✅ merge 完成（无冲突）"
   else
-    # 尝试自动解决 .gitignore 冲突（-X theirs 不能消解 add/add 冲突时）
+    # 自动解决 .gitignore 冲突（-X theirs 不能消解 add/add 冲突）
     if git diff --name-only --diff-filter=U 2>/dev/null | grep -qx '.gitignore'; then
-      echo "🔧 自动解决 .gitignore 冲突（保留 public 侧条目）..."
+      echo "🔧 auto-resolve .gitignore (keep public version)..."
       git checkout --ours .gitignore
       git add .gitignore
     fi
+    # 自动解决内部文件的 modify/delete 冲突（public 删了、master 改了）
+    # 内部文件在 public 上就该不存在，直接 git rm 即可
+    for f in "${INTERNAL_FILES[@]}"; do
+      if git diff --name-only --diff-filter=U 2>/dev/null | grep -qx "$f"; then
+        echo "🔧 auto-resolve internal file conflict (remove): $f"
+        git rm "$f" 2>/dev/null || true
+      fi
+    done
     # 检查是否还有未解决的冲突
     if git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
       echo "⚠️  仍有未解决的冲突，请手动处理后回车继续..."
@@ -62,7 +70,7 @@ for line in "${GITIGNORE_GUARD_LINES[@]}"; do
     echo "" >> .gitignore
     echo "$line" >> .gitignore
     git add .gitignore
-    echo "🔧 已补回 .gitignore 条目: $line"
+    echo "🔧 ensured .gitignore guard: $line"
   fi
 done
 
@@ -70,7 +78,7 @@ done
 for f in "${INTERNAL_FILES[@]}"; do
   if git ls-files --error-unmatch "$f" 2>/dev/null; then
     git rm -r --cached "$f" 2>/dev/null || git rm --cached "$f" 2>/dev/null
-    echo "🗑️  已从 public 剥离: $f"
+    echo "🗑️  stripped from public: $f"
   fi
 done
 
@@ -78,10 +86,10 @@ done
 if git diff --cached --quiet 2>/dev/null; then
   echo "没有新的改动需要提交"
 else
-  git commit -m "sync: master → public（自动剥离 _dev/ CLAUDE.md）"
-  echo "✅ 已提交同步"
+  git commit -m "sync: master → public (auto-strip _dev/ CLAUDE.md)"
+  echo "✅ sync committed"
 fi
 
 echo "---"
-echo "当前分支: public"
-echo "下一步: git push github public:main"
+echo "now on branch: public"
+echo "next: git push github public:main"
