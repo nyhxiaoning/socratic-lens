@@ -11,6 +11,7 @@
 set -euo pipefail
 
 INTERNAL_FILES=("_dev" "CLAUDE.md" "scripts/sync-to-public.sh")
+GITIGNORE_GUARD_LINES=("# 内部开发文档，不公开" "_dev/" "CLAUDE.md")
 
 echo "=== 同步 master → public ==="
 
@@ -33,19 +34,37 @@ git checkout public
 if [ $# -eq 0 ]; then
   # 模式 1：合并 master 全部改动
   echo "合并 master 全量改动..."
-  # --allow-unrelated-histories：filter-branch 重写后两分支无共同祖先
-  # -X theirs：冲突时优先用 master 版本（内部文件后面统一剥离）
-  if git merge master --allow-unrelated-histories --no-commit --no-ff -X theirs 2>&1; then
+  # -X theirs：冲突时优先用 master 版本（内部文件后面统一剥离，gitignore 后面统一修复）
+  if git merge master --no-commit --no-ff -X theirs 2>&1; then
     echo "✅ merge 完成（无冲突）"
   else
-    echo "⚠️  有冲突，请手动解决后回车继续..."
-    read -r
+    # 尝试自动解决 .gitignore 冲突（-X theirs 不能消解 add/add 冲突时）
+    if git diff --name-only --diff-filter=U 2>/dev/null | grep -qx '.gitignore'; then
+      echo "🔧 自动解决 .gitignore 冲突（保留 public 侧条目）..."
+      git checkout --ours .gitignore
+      git add .gitignore
+    fi
+    # 检查是否还有未解决的冲突
+    if git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
+      echo "⚠️  仍有未解决的冲突，请手动处理后回车继续..."
+      read -r
+    fi
   fi
 else
   # 模式 2：cherry-pick 指定范围
   echo "cherry-pick $* ..."
   git cherry-pick "$@"
 fi
+
+# 确保 .gitignore 包含内部文件条目（-X theirs 合并后可能被 master 版本覆盖）
+for line in "${GITIGNORE_GUARD_LINES[@]}"; do
+  if ! grep -qFx "$line" .gitignore 2>/dev/null; then
+    echo "" >> .gitignore
+    echo "$line" >> .gitignore
+    git add .gitignore
+    echo "🔧 已补回 .gitignore 条目: $line"
+  fi
+done
 
 # 剥离内部文件（只删 index 里的，不管磁盘上有没有）
 for f in "${INTERNAL_FILES[@]}"; do
