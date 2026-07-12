@@ -33,7 +33,9 @@ git checkout public
 if [ $# -eq 0 ]; then
   # 模式 1：合并 master 全部改动
   echo "合并 master 全量改动..."
-  if git merge master --no-commit --no-ff 2>/dev/null; then
+  # --allow-unrelated-histories：filter-branch 重写后两分支无共同祖先
+  # -X theirs：冲突时优先用 master 版本（内部文件后面统一剥离）
+  if git merge master --allow-unrelated-histories --no-commit --no-ff -X theirs 2>&1; then
     echo "✅ merge 完成（无冲突）"
   else
     echo "⚠️  有冲突，请手动解决后回车继续..."
