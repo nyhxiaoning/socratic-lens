@@ -8,7 +8,7 @@
 
 ## 推荐
 
-本项目是 Socratopia 的开源审计补充———你把你用AI造的书放socratic-lens 上跑审计，看看书写得怎么样、讲得怎么样，方便你再去调整你的书，让你的想法切实的得到实现。
+本项目是 Socratopia 的衍生项目———用来把你造的书放在工具上跑审计，看看书写得怎么样、讲得怎么样，方便你再去调整你的书，让你造书时的想法切实的得到实现。并且得到一次直观的感受。
 
 对于自己造的书，开发者推荐大家使用 Scotopia 官方学习工具：[Socratopia — AI-Powered Socratic Learning](https://www.socratopia.app/zh)。
 
