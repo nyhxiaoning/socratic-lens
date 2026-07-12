@@ -26,16 +26,5 @@ data/books/**/*.pages.json
 .omo/
 
 # 内部开发文档，不公开
+_dev/
 CLAUDE.md
-AGENTS.md
-PLAN.md
-STATUS.md
-REVERSE-ENGINEERING-REPORT.md
-AI-DRIVEN-DEVELOPMENT-INSIGHTS.md
-CONVERSATION-CONTEXT.md
-GIT-WORKFLOW.md
-docs/
-lib/__tests__/
-prompts/learner_critic.md
-prompts/learner_mid.md
-prompts/learner_novice.md
