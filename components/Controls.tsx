@@ -200,9 +200,9 @@ export function Controls(p: ControlsProps) {
           onChange={(e) => p.onMaxTurns(Number(e.target.value))}
           disabled={p.running}
         >
-          {[3, 6, 12, 30, 80, 120].map((n) => (
+          {[3, 6, 12, 30, 80, 120, 0].map((n) => (
             <option key={n} value={n}>
-              {n}
+              {n === 0 ? "直到本节结束" : n}
             </option>
           ))}
         </select>

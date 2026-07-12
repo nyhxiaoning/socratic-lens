@@ -12,10 +12,9 @@ data/audits/
 /data/checklists/
 /data/fidelity/
 
-# 允许提交 example 和 makesi，其它 slug 的书忽略
+# 允许提交 example，其它 slug 的书忽略
 data/books/*
 !data/books/example
-!data/books/makesi
 
 # 分页缓存可再生，忽略
 data/books/**/*.pages.json
@@ -25,3 +24,18 @@ data/books/**/*.pages.json
 # 工具本地状态，不入版本控制
 .claude/
 .omo/
+
+# 内部开发文档，不公开
+CLAUDE.md
+AGENTS.md
+PLAN.md
+STATUS.md
+REVERSE-ENGINEERING-REPORT.md
+AI-DRIVEN-DEVELOPMENT-INSIGHTS.md
+CONVERSATION-CONTEXT.md
+GIT-WORKFLOW.md
+docs/
+lib/__tests__/
+prompts/learner_critic.md
+prompts/learner_mid.md
+prompts/learner_novice.md

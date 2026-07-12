@@ -196,9 +196,9 @@ export function renderCoachBlock(a: CoachAnalysis): string {
 // ============================================================================
 
 const LEARNER_LABEL: Record<string, string> = {
-  novice: "novice（新手：几乎没有预备知识）",
-  mid: "mid（中级：有基础，会复述与追问）",
-  critic: "critic（挑刺型：主动找边界与反例）",
+  passive: "passive（冷淡型：不懂且不爱说话，问一句答一句）",
+  moderate: "moderate（适度型：不懂但愿意学，正常互动）",
+  active: "active（话痨型：不懂但热情高，话多易跑题）",
 };
 
 export async function analyzeLearnerWithCoach(opts: {

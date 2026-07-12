@@ -1,10 +1,28 @@
-export type LearnerId = "novice" | "mid" | "critic";
+export type LearnerId = "passive" | "moderate" | "active";
 export type Pacing = "thorough" | "normal" | "express";
 
+export type CoverageCategory = "knowledgePoint" | "criteria" | "exercise" | "errorSpot";
+
+export type CoverageItem = {
+  id: string;
+  category: CoverageCategory;
+  name: string;
+  sourceQuote: string;
+  status: "uncovered" | "covered";
+  evidence?: string;
+  coveredAtTurn?: number;
+};
+
+export type CoverageStats = {
+  total: number;
+  covered: number;
+  byCategory: Record<CoverageCategory, { total: number; covered: number }>;
+};
+
 export const LEARNERS: { id: LearnerId; label: string; desc: string }[] = [
-  { id: "novice", label: "新手", desc: "没啥预备知识，多问为什么、求例子" },
-  { id: "mid", label: "中级", desc: "有基础，会复述、会追问细节" },
-  { id: "critic", label: "挑刺型", desc: "主动找边界与反例，容易质疑" },
+  { id: "passive", label: "冷淡型", desc: "问一句答一句，不主动提问，回复极短" },
+  { id: "moderate", label: "适度型", desc: "正常互动，不懂就问，中等篇幅" },
+  { id: "active", label: "话痨型", desc: "热情高话多，主动追问联想，容易跑题" },
 ];
 
 export const PACINGS: { id: Pacing; label: string; desc: string }[] = [
@@ -116,9 +134,13 @@ export type SessionEvent =
       promptTokens: number;
       completionTokens: number;
       costCny: number;
+      cacheHitTokens?: number;
+      cacheMissTokens?: number;
     }
   | { type: "done"; sid: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "coverage_init"; items: CoverageItem[] }
+  | { type: "coverage_update"; items: CoverageItem[]; newlyCovered: string[]; stats: CoverageStats };
 
 export type AuditDimension = "book" | "teacher" | "fidelity" | "coverage";
 

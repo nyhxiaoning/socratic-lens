@@ -1,5 +1,5 @@
 import path from "node:path";
-import { callLLM } from "./llm";
+import { callLLM, callLLMWithTool, type ToolDef } from "./llm";
 import { readText, PROMPTS_ROOT, ensureDir, writeAtomic, DATA_ROOT } from "./storage";
 import { normalizeForMatch } from "./citations";
 
@@ -42,36 +42,122 @@ export type FidelityResult = {
   dir: string;
 };
 
-function parseJsonLoose(raw: string): unknown {
+export function parseJsonLoose(raw: string): unknown {
+  // 0. 剥 <think>...</think> 块（DeepSeek 经常在 JSON 前输出思考过程）
+  let s = raw.trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
   // 1. 只尝试直接解析
   try {
-    return JSON.parse(raw);
+    return JSON.parse(s);
   } catch { /* fallthrough */ }
 
   // 2. 剥 ```json ... ``` / ``` ... ``` 围栏
-  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) {
     try {
       return JSON.parse(fence[1]);
     } catch { /* fallthrough */ }
   }
 
-  // 3. 兜底：取第一个 { 到最后一个 } 之间
-  const firstBrace = raw.indexOf("{");
+  // 3. 修复常见 JSON 语法错误（尾逗号等）再试
+  const cleaned = s
+    .replace(/,\s*}/g, "}")   // 尾逗号在 }
+    .replace(/,\s*\]/g, "]");  // 尾逗号在 ]
+  try {
+    return JSON.parse(cleaned);
+  } catch { /* fallthrough */ }
+
+  // 4. 兜底：取第一个 { 到最后一个 } 之间
+  const firstBrace = s.indexOf("{");
   if (firstBrace >= 0) {
-    const lastBrace = raw.lastIndexOf("}");
+    const lastBrace = s.lastIndexOf("}");
     if (lastBrace > firstBrace) {
       try {
-        return JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+        return JSON.parse(s.slice(firstBrace, lastBrace + 1));
       } catch { /* fallthrough */ }
     }
   }
 
-  throw new Error(`Fidelity: LLM 输出不是合法 JSON`);
+  const preview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
+  throw new Error(`Fidelity: LLM 输出不是合法 JSON。原始输出预览: ${preview}`);
 }
 
 function asArray(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
+}
+
+/**
+ * 从纯文本行格式解析知识点清单。
+ * 格式：
+ * KP|id|name|"sourceQuote"|note
+ * AC|id|desc|"sourceQuote"
+ * EX|id|question|answer|"sourceQuote"
+ * ES|id|desc|"sourceQuote"
+ */
+export function parseChecklistText(raw: string): Checklist {
+  let s = raw.trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) s = fence[1].trim();
+
+  const kps: KnowledgePoint[] = [];
+  const acs: Criterion[] = [];
+  const exs: Exercise[] = [];
+  const ess: ErrorSpot[] = [];
+
+  // 提取引号内的 sourceQuote
+  const unquote = (t: string) => t.replace(/^"|"$/g, "").trim();
+
+  for (const line of s.split(/\n+/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split("|");
+    const type = parts[0].trim().toUpperCase();
+
+    switch (type) {
+      case "KP":
+        if (parts.length >= 4) {
+          kps.push({
+            id: parts[1].trim(),
+            name: parts[2].trim(),
+            sourceQuote: unquote(parts[3]),
+            note: parts[4]?.trim() || undefined,
+          });
+        }
+        break;
+      case "AC":
+        if (parts.length >= 4) {
+          acs.push({
+            id: parts[1].trim(),
+            desc: parts[2].trim(),
+            sourceQuote: unquote(parts[3]),
+          });
+        }
+        break;
+      case "EX":
+        if (parts.length >= 5) {
+          exs.push({
+            id: parts[1].trim(),
+            question: parts[2].trim(),
+            answer: parts[3].trim(),
+            sourceQuote: unquote(parts[4]),
+          });
+        }
+        break;
+      case "ES":
+        if (parts.length >= 4) {
+          ess.push({
+            id: parts[1].trim(),
+            desc: parts[2].trim(),
+            sourceQuote: unquote(parts[3]),
+          });
+        }
+        break;
+    }
+  }
+
+  return { knowledgePoints: kps, assessmentCriteria: acs, exercises: exs, errorSpots: ess };
 }
 
 export function parseChecklist(raw: string): Checklist {
@@ -115,6 +201,54 @@ export function parseChecklist(raw: string): Checklist {
 
 const VALID_STATUS: ReconStatus[] = ["landed", "morphed", "dropped"];
 const VALID_CATEGORY: ReconCategory[] = ["knowledgePoint", "criteria", "exercise", "errorSpot"];
+
+/**
+ * 从纯文本行格式解析勾稽结果。
+ * 格式：ROW|checklistId|category|itemName|status|synthQuote|note
+ * 最后一行：VERDICT|总评文本
+ */
+export function parseReconciliationText(raw: string): { rows: Row[]; verdict: string } {
+  // 剥 <think> 块和 ``` 围栏
+  let s = raw.trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) s = fence[1].trim();
+
+  const rows: Row[] = [];
+  let verdict = "";
+  const lines = s.split(/\n+/);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // VERDICT 行
+    if (trimmed.startsWith("VERDICT|")) {
+      verdict = trimmed.slice("VERDICT|".length).trim();
+      continue;
+    }
+
+    // ROW 行
+    if (trimmed.startsWith("ROW|")) {
+      const parts = trimmed.slice("ROW|".length).split("|");
+      if (parts.length < 5) continue;
+      const status = parts[3].trim();
+      if (!VALID_STATUS.includes(status as ReconStatus)) continue;
+      const category = parts[1].trim();
+      if (!VALID_CATEGORY.includes(category as ReconCategory)) continue;
+      rows.push({
+        checklistId: parts[0].trim(),
+        category: category as ReconCategory,
+        itemName: parts[2].trim(),
+        status: status as ReconStatus,
+        synthQuote: parts[4]?.trim() || undefined,
+        note: parts[5]?.trim() || undefined,
+      });
+    }
+  }
+
+  return { rows, verdict };
+}
 
 export function parseReconciliation(raw: string): Row[] {
   const o = parseJsonLoose(raw) as Record<string, unknown>;
@@ -217,33 +351,155 @@ export function renderChecklistMd(c: Checklist): string {
   return lines.join("\n");
 }
 
-const MAX_LLM_ATTEMPTS = 2;
+const MAX_LLM_ATTEMPTS = 3;
 
-/** 抽清单：读源章 → LLM → 结构化 Checklist。解析失败重试 1 次。
- *  @param rulesFile 可选 prompt 文件名，默认 fidelity_extract.md（覆盖度审计可传不同 prompt）。 */
+/** 抽清单用的 tool schema。 */
+const CHECKLIST_TOOL: ToolDef = {
+  name: "output_checklist",
+  description: "从源材料提取教学内容清单，输出结构化 JSON",
+  parameters: {
+    type: "object",
+    properties: {
+      knowledgePoints: {
+        type: "array",
+        description: "知识点列表",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            name: { type: "string" },
+            sourceQuote: { type: "string", description: "源材料里的原句" },
+            note: { type: "string" },
+          },
+          required: ["id", "name", "sourceQuote"],
+          additionalProperties: false,
+        },
+      },
+      assessmentCriteria: {
+        type: "array",
+        description: "评价标准",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            desc: { type: "string" },
+            sourceQuote: { type: "string" },
+          },
+          required: ["id", "desc", "sourceQuote"],
+          additionalProperties: false,
+        },
+      },
+      exercises: {
+        type: "array",
+        description: "教材原题",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            question: { type: "string" },
+            answer: { type: "string" },
+            sourceQuote: { type: "string" },
+          },
+          required: ["id", "question", "answer", "sourceQuote"],
+          additionalProperties: false,
+        },
+      },
+      errorSpots: {
+        type: "array",
+        description: "易错点",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            desc: { type: "string" },
+            sourceQuote: { type: "string" },
+          },
+          required: ["id", "desc", "sourceQuote"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["knowledgePoints", "assessmentCriteria", "exercises", "errorSpots"],
+    additionalProperties: false,
+  },
+};
+
+/** 勾稽用的 tool schema。 */
+export const RECONCILE_TOOL: ToolDef = {
+  name: "output_reconciliation",
+  description: "对清单每一条判断在目标文本中是否覆盖，输出勾稽表",
+  parameters: {
+    type: "object",
+    properties: {
+      rows: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            checklistId: { type: "string" },
+            category: { type: "string", enum: ["knowledgePoint", "criteria", "exercise", "errorSpot"] },
+            itemName: { type: "string" },
+            status: { type: "string", enum: ["landed", "morphed", "dropped"] },
+            synthQuote: { type: "string" },
+            note: { type: "string" },
+          },
+          required: ["checklistId", "category", "itemName", "status"],
+          additionalProperties: false,
+        },
+      },
+      verdict: { type: "string" },
+    },
+    required: ["rows", "verdict"],
+    additionalProperties: false,
+  },
+};
+
+/** 抽清单：读源章 → LLM → Checklist。双路径：tool calling → 文本格式降级。 */
 export async function extractChecklist(sourceText: string, signal: AbortSignal, rulesFile?: string): Promise<Checklist> {
   const rules = await readText(path.join(PROMPTS_ROOT, rulesFile ?? "fidelity_extract.md"));
+  const userMsg = `## 源材料（本章）\n\n${sourceText}`;
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
-    const raw = await callLLM(
-      "audit",
-      [
-        { role: "system", content: rules },
-        { role: "user", content: `## 源材料（本章）\n\n${sourceText}` },
-      ],
-      { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
-    );
+
+  // 路径 1: Tool calling（优先）
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const retryBanner = attempt > 1 ? `\n\n---\n⚠️ 上一步输出不合法。严格按函数 schema 输出。` : "";
     try {
-      return parseChecklist(raw);
+      const result = await callLLMWithTool(
+        "audit",
+        [{ role: "system", content: rules + retryBanner }, { role: "user", content: userMsg }],
+        CHECKLIST_TOOL,
+        { temperature: Math.max(0.05, 0.2 - attempt * 0.08), maxTokens: 4000, signal },
+      );
+      return parseChecklist(JSON.stringify(result));
     } catch (e) {
       lastErr = e;
       if (signal.aborted) break;
     }
   }
+
+  // 路径 2: 纯文本行格式（thinking 模型降级）
+  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+    if (signal.aborted) break;
+    const retryBanner = attempt > 1 ? `\n\n---\n⚠️ 上一步输出不符合格式。严格按 KP|... AC|... EX|... ES|... 格式输出。` : "";
+    try {
+      const raw = await callLLM(
+        "audit",
+        [{ role: "system", content: rules + retryBanner }, { role: "user", content: userMsg }],
+        { temperature: Math.max(0.1, 0.3 - attempt * 0.1), maxTokens: 4000, signal },
+      );
+      const checklist = parseChecklistText(raw);
+      const total = checklist.knowledgePoints.length + checklist.assessmentCriteria.length +
+        checklist.exercises.length + checklist.errorSpots.length;
+      if (total === 0) throw new Error("未解析到任何清单条目");
+      return checklist;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
   throw new Error(`Fidelity 抽清单失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
-/** 勾稽：清单 + 合成节 → LLM → Row[]（含 verbatim 校验）+ verdict。解析失败重试 1 次。 */
+/** 勾稽：清单 + 合成节 → LLM → Row[]（含 verbatim 校验）+ verdict。双路径。 */
 export async function reconcile(
   checklist: Checklist,
   synthText: string,
@@ -258,28 +514,40 @@ export async function reconcile(
     synthText,
   ].join("\n");
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
-    const raw = await callLLM(
-      "audit",
-      [
-        { role: "system", content: rules },
-        { role: "user", content: user },
-      ],
-      { jsonMode: true, temperature: 0.2, maxTokens: 4000, signal },
-    );
+
+  // 路径 1: Tool calling（优先）
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const retryBanner = attempt > 1 ? `\n\n---\n⚠️ 上一步输出不合法。严格按函数 schema 输出。` : "";
     try {
-      const rows = verifyQuotes(parseReconciliation(raw), synthText);
-      let verdict = "";
-      try {
-        const o = JSON.parse(raw) as { verdict?: unknown };
-        if (o.verdict != null) verdict = String(o.verdict);
-      } catch {
-        /* verdict 可选，拿不到就空 */
-      }
-      return { rows, verdict };
+      const result = await callLLMWithTool(
+        "audit",
+        [{ role: "system", content: rules + retryBanner }, { role: "user", content: user }],
+        RECONCILE_TOOL,
+        { temperature: Math.max(0.05, 0.2 - attempt * 0.08), maxTokens: 4000, signal },
+      );
+      const rows = verifyQuotes(parseReconciliation(JSON.stringify(result)), synthText);
+      return { rows, verdict: String(result.verdict ?? "") };
     } catch (e) {
       lastErr = e;
       if (signal.aborted) break;
+    }
+  }
+
+  // 路径 2: 纯文本行格式（thinking 模型降级）
+  for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+    if (signal.aborted) break;
+    const retryBanner = attempt > 1 ? `\n\n---\n⚠️ 上一步输出不符合格式。严格按 ROW|... 格式输出。` : "";
+    try {
+      const raw = await callLLM(
+        "audit",
+        [{ role: "system", content: rules + retryBanner }, { role: "user", content: user }],
+        { temperature: Math.max(0.1, 0.3 - attempt * 0.1), maxTokens: 4000, signal },
+      );
+      const { rows, verdict } = parseReconciliationText(raw);
+      if (rows.length === 0) throw new Error("未解析到任何 ROW 行");
+      return { rows: verifyQuotes(rows, synthText), verdict };
+    } catch (e) {
+      lastErr = e;
     }
   }
   throw new Error(`Fidelity 勾稽失败：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);

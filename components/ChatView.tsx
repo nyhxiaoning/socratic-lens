@@ -10,7 +10,7 @@ type ChatViewProps = {
   onCite: (id: string) => void;
 };
 
-/** 消息滚动区（引用 chip 会根据校验结果标 miss）。 */
+/** 消息滚动区。教师引用标记被渲染为可点击的隐藏脚注。 */
 export const ChatView = forwardRef<HTMLDivElement, ChatViewProps>(function ChatView(
   { messages, running, maxTurns, citations, onCite },
   ref,
@@ -28,7 +28,7 @@ export const ChatView = forwardRef<HTMLDivElement, ChatViewProps>(function ChatV
     >
       {messages.length === 0 && !running && (
         <div style={{ color: "var(--muted)", textAlign: "center", padding: 40 }}>
-          选好书、节和学生档位，点"开始"。教师说完一轮学生跟上，共 {maxTurns} 轮。
+          选好书、节和学生档位，点"开始"。教师说完一轮学生跟上{maxTurns === 0 ? "，直到本节结束" : `，共 ${maxTurns} 轮`}。
         </div>
       )}
       {messages.map((m, i) => (
@@ -92,38 +92,49 @@ function renderWithCitations(
   let m: RegExpExecArray | null;
   const re = new RegExp(CITE_RE.source, "g");
   let key = 0;
-  // 记录教师本轮里第 n 个引用对应 turnCites 的第 n 项（简单同序 zip）
   let citeIdx = 0;
+
   while ((m = re.exec(text)) !== null) {
     if (m.index > lastIdx) out.push(text.slice(lastIdx, m.index));
     const id = m[1];
     const snippet = m[2] || "";
     const cite = turnCites?.[citeIdx++];
-    const hit = cite ? cite.hit : true; // 学生消息或没记录时默认视为 ok
+    const hit = cite ? cite.hit : true;
     out.push(
-      <button
-        key={`c${key++}`}
-        onClick={() => onCite(id)}
-        title={hit ? "查看该节原文" : "⚠️ verbatim miss：引用片段在本节原文里没有逐字出现"}
-        style={{
-          display: "inline",
-          padding: "0 6px",
-          margin: "0 2px",
-          fontSize: "0.85em",
-          border: `1px solid ${hit ? "var(--accent)" : "var(--danger)"}`,
-          borderRadius: 4,
-          background: hit ? "transparent" : "rgba(255,0,0,0.08)",
-          color: hit ? "var(--accent)" : "var(--danger)",
-          cursor: "pointer",
-        }}
-      >
-        §{id}
-        {snippet && ` · ${snippet}`}
-        {!hit && " ⚠"}
-      </button>,
+      <CiteBadge key={`c${key++}`} id={id} snippet={snippet} hit={hit} onCite={onCite} />,
     );
     lastIdx = m.index + m[0].length;
   }
   if (lastIdx < text.length) out.push(text.slice(lastIdx));
   return out;
+}
+
+/** 隐藏式引用脚注：只显示一个小 § 标记，点击打开原文全文模态。 */
+function CiteBadge({
+  id, snippet, hit, onCite,
+}: {
+  id: string; snippet: string; hit: boolean; onCite: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onCite(id)}
+      title={snippet ? `${snippet}${hit ? "" : " ⚠️ verbatim miss"}` : (hit ? "点击查看本节原文" : "⚠️ verbatim miss：该片段在原文中没有逐字出现")}
+      style={{
+        display: "inline",
+        padding: "0 3px",
+        margin: "0 1px",
+        fontSize: "0.75em",
+        verticalAlign: "super",
+        border: `1px solid ${hit ? "var(--border)" : "var(--danger)"}`,
+        borderRadius: 3,
+        background: hit ? "var(--bg)" : "rgba(255,0,0,0.08)",
+        color: hit ? "var(--muted)" : "var(--danger)",
+        cursor: "pointer",
+        lineHeight: 1,
+      }}
+    >
+      §{id}
+      {!hit && " ⚠"}
+    </button>
+  );
 }

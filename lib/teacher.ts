@@ -6,8 +6,17 @@ import { LLMMessage } from "./llm";
 import { renderWindow } from "./pagination";
 import { PROMPTS_ROOT, readText } from "./storage";
 
-export type LearnerId = "novice" | "mid" | "critic";
+export type LearnerId = "passive" | "moderate" | "active";
 export type Pacing = "thorough" | "normal" | "express";
+
+/** 兼容旧 session 的 learnerId（novice→passive, mid→moderate, critic→active）。 */
+export function normalizeLearnerId(raw: string): LearnerId {
+  const map: Record<string, LearnerId> = {
+    novice: "passive", mid: "moderate", critic: "active",
+    passive: "passive", moderate: "moderate", active: "active",
+  };
+  return map[raw] ?? "moderate";
+}
 
 /** 教师窗口——如果本节被分页，只塞当前 [startPage, endPage]；否则整节全塞。 */
 export type TeacherWindow = {
@@ -43,7 +52,7 @@ export async function buildTeacherSystemPrompt(
   window?: { startPage: number; endPage: number },
 ): Promise<{ systemPrompt: string; window: TeacherWindow }> {
   const rules = await readText(path.join(PROMPTS_ROOT, "teacher_rules.md"));
-  const learnerCard = await readText(path.join(PROMPTS_ROOT, `learner_${learnerId}.md`));
+  const learnerCard = await readText(path.join(PROMPTS_ROOT, `learner_${normalizeLearnerId(learnerId)}.md`));
   const sectionTitle = getSectionTitle(book, sectionId);
 
   const pages = await getPages(bookSlug, sectionId);
@@ -103,8 +112,8 @@ export async function buildTeacherSystemPrompt(
       ? `## 教材库（其它节标题，本次不许讲）\n\n${otherSections}`
       : `## 教材库\n\n（只有本节）`,
     `## 本节课节奏档位\n\n**${PACING_LABEL[pacing]}** ——${pacingHint(pacing)}`,
-    `## 引用格式\n\n引用书中原文用：〔§${sectionId}｜前若干字〕。\n只能引用「本节原文」当前窗口里逐字存在的片段；引窗口以外或本节以外的任何内容都算越界。`,
-    `## 铁律（最后一遍强调）\n\n- 严禁讲当前窗口原文之外的知识（哪怕你"知道"、或者你之前讲过）。\n- 严禁假装读过其它章节或本节后文。\n- 严禁 AI 式积极表扬（"太棒了"/"回答得非常好"）。\n- 严禁 emoji 与动作神态描写（\`*微笑*\` / \`（点头）\` 一律不许）。\n- 严禁主动说"下课"/"今天先到这里"——由上层控制。\n- 每条消息必须以问题结尾，且最多讲一个点。`,
+    `## 引用标记（系统脚注，学生看不到）\n\n你讲的每个知识点，都要在讲到的地方加一个引用标记：〔§${sectionId}｜你正在讲的这个点的简短概括〕。\n\n这是给系统后台用的脚注——**学生完全看不到**。所以你不要因为加了标记就把整句话变成照念课本。你继续说人话，用你自己的方式解释，标记只是顺手贴上去的"这个点对应课本哪里"的标签。\n\n标记里的片段用你自己的话简短概括即可（比如"三单加s""I play vs He plays"），不需要逐字抄课本。`,
+    `## 铁律（最后一遍强调）\n\n- **每条消息至少打一个引用标记**〔§${sectionId}｜概括〕——不打标记的系统无法追踪你的教学覆盖。\n- 严禁讲当前窗口原文之外的知识（哪怕你"知道"、或者你之前讲过）。\n- 严禁假装读过其它章节或本节后文。\n- 严禁 AI 式积极表扬（"太棒了"/"回答得非常好"）。\n- 严禁 emoji 与动作神态描写（\`*微笑*\` / \`（点头）\` 一律不许）。\n- 严禁主动说"下课"/"今天先到这里"——由上层控制。\n- 每条消息必须以问题结尾，且最多讲一个点。`,
   ];
 
   if (coach) parts.push(renderCoachBlock(coach));

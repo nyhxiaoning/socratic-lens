@@ -20,7 +20,7 @@
 ## 你手上有什么
 
 - 最近若干轮师生对话（不超过 10 轮）
-- 学生的画像档位（novice / mid / critic）——你要把 ta 的反应放回这个档位里判断
+- 学生的画像档位（passive / moderate / active）——你要把 ta 的反应放回这个档位里判断
 - 本节课在讲什么书的哪一节（不给你原文——学生看不到，你也不该看到，这样才能真判断"ta 只从老师的话里学"）
 - 教学节奏（thorough / normal / express）
 
@@ -72,9 +72,9 @@
 - `strong`：学生明确用了老师从未提过的术语、公式或专有结论——这**几乎肯定**是预训练泄露
 
 **personaFidelity**（画像忠诚度）：
-- `faithful`：反应模式符合 ta 的档位（novice 就应该多问 why、少术语；critic 就应该找反例；等等）
-- `drifting`：偶尔脱离档位（novice 突然用了个精准术语）
-- `broken`：完全脱离画像（critic 变得听话、novice 变得侃侃而谈）
+- `faithful`：反应模式符合 ta 的档位（passive 就应该话少、不主动；moderate 就该正常互动；active 就该话多、追问；等等）
+- `drifting`：偶尔脱离档位（passive 突然长篇大论、active 突然只回两个字）
+- `broken`：完全脱离画像（passive 变得侃侃而谈、active 变得沉默寡言）
 
 **affect**（当下心态）：
 - `engaged`：正常投入
@@ -98,6 +98,7 @@
 - `"persona_drift"`：档位角色漂移
 - `"passive_stall"`：连续两轮以上只回"嗯"、"好"
 - `"unnecessary_praise"`：学生开始夸老师（学生不应该赞美老师，学生就是学生）
+- `"derailing"`：学生的生活关联展开了成了故事（超过一句话），或从当前教学点跳到了不相关的话题（A→B→C 联想链），或在老师还没教的时候提前推导出后续规则
 
 ## 硬规则
 

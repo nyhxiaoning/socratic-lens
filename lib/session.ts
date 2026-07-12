@@ -9,6 +9,8 @@ import {
 import { callLLM, type LLMUsage, type Purpose } from "./llm";
 import { verifyTurnCitations, type Citation } from "./citations";
 import { estimateCost } from "./pricing";
+import { getChecklist } from "./checklist";
+import { initCoverageState, updateCoverage, matchCoverageWithLLM, coverageStats, type CoverageItem } from "./coverage-tracker";
 import {
   buildLearnerMessages,
   buildLearnerSystemPrompt,
@@ -27,6 +29,7 @@ import {
   buildTeacherMessages,
   buildTeacherSystemPrompt,
   TEACHER_OPENING_TRIGGER,
+  normalizeLearnerId,
   type LearnerId,
   type Pacing,
 } from "./teacher";
@@ -78,9 +81,13 @@ export type SessionEvent =
       promptTokens: number;
       completionTokens: number;
       costCny: number;
+      cacheHitTokens?: number;
+      cacheMissTokens?: number;
     }
   | { type: "done"; sid: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "coverage_init"; items: import("./coverage-tracker").CoverageItem[] }
+  | { type: "coverage_update"; items: import("./coverage-tracker").CoverageItem[]; newlyCovered: string[]; stats: ReturnType<typeof import("./coverage-tracker").coverageStats> };
 
 /** 一条 usage 记录，落盘到 data/sessions/<sid>/usage.jsonl */
 export type UsageRecord = {
@@ -121,6 +128,16 @@ async function writeMeta(meta: SessionMeta): Promise<void> {
 
 async function appendTurn(sid: string, turn: Turn): Promise<void> {
   await appendLine(path.join(sessionDir(sid), "transcript.jsonl"), JSON.stringify(turn));
+}
+
+async function readCoverage(sid: string): Promise<CoverageItem[] | null> {
+  const p = path.join(sessionDir(sid), "coverage.json");
+  if (!(await exists(p))) return null;
+  try { return await readJson<CoverageItem[]>(p); } catch { return null; }
+}
+
+async function writeCoverage(sid: string, items: CoverageItem[]): Promise<void> {
+  await writeAtomic(path.join(sessionDir(sid), "coverage.json"), JSON.stringify(items, null, 2));
 }
 
 async function appendCoach(
@@ -390,7 +407,7 @@ export async function* runSession(
       sid,
       bookSlug: input.bookSlug,
       sectionId: input.sectionId,
-      learnerId: input.learnerId,
+      learnerId: normalizeLearnerId(input.learnerId),
       pacing: input.pacing,
       coachEnabled: input.coachEnabled,
       learnerCoachEnabled: input.learnerCoachEnabled,
@@ -409,6 +426,29 @@ export async function* runSession(
 
     const book = await getBook(meta.bookSlug);
     const sectionTitle = getSectionTitle(book, meta.sectionId);
+
+    // ---- 覆盖度追踪：加载知识点清单 ----
+    let coverageItems: CoverageItem[] = [];
+    const checklist = await getChecklist(meta.bookSlug, meta.sectionId);
+    if (checklist) {
+      // Resume: 优先读落盘的覆盖状态（包含 LLM 匹配结果，重放恢复不全）
+      const savedCoverage = await readCoverage(meta.sid);
+      if (savedCoverage) {
+        coverageItems = savedCoverage;
+      } else {
+        coverageItems = initCoverageState(checklist);
+        // 重建：重放历史轮次的教师发言，恢复字符串匹配的覆盖
+        for (const t of turns) {
+          if (t.actor === "teacher") {
+            const { items: updated } = updateCoverage(coverageItems, t.text, t.turn);
+            coverageItems = updated;
+          }
+        }
+      }
+      yield { type: "coverage_init", items: coverageItems };
+      // 首次初始化后落盘，确保后续 resume 能直接读到
+      if (!savedCoverage) await writeCoverage(meta.sid, coverageItems);
+    }
 
     // 从 turns 里恢复"下一个 turnIdx"
     let turnIdx = meta.turnsSoFar; // 已完成 N 个 turn，接下来是 N+1
@@ -434,6 +474,8 @@ export async function* runSession(
     let cumPromptTokens = 0;
     let cumCompletionTokens = 0;
     let cumCostCny = 0;
+    let cumCacheHitTokens = 0;
+    let cumCacheMissTokens = 0;
     // 存到闭包里的"待推送 usage 事件"——每轮末尾一次性 yield，避免频繁 SSE
     let usageDirty = false;
     const recordUsage = (purpose: Purpose, turn: number) => (u: LLMUsage) => {
@@ -441,6 +483,8 @@ export async function* runSession(
       cumPromptTokens += u.promptTokens;
       cumCompletionTokens += u.completionTokens;
       cumCostCny += cost;
+      if (u.cacheHitTokens != null) cumCacheHitTokens += u.cacheHitTokens;
+      if (u.cacheMissTokens != null) cumCacheMissTokens += u.cacheMissTokens;
       usageDirty = true;
       // 落盘：append 到 usage.jsonl
       const rec: UsageRecord = {
@@ -479,7 +523,11 @@ export async function* runSession(
     // 本节原文：verbatim 引用校验用（session 一节内不变，预取一次）
     const sectionText = await getSection(meta.bookSlug, meta.sectionId);
 
-    while (turnIdx < meta.maxTurns) {
+    // maxTurns=0 表示"直到本节教学结束"：自动在最后一页讲完后停止
+    const AUTO_STOP = meta.maxTurns === 0;
+    const effectiveMax = AUTO_STOP ? 200 : meta.maxTurns;
+
+    while (turnIdx < effectiveMax) {
       if (input.signal.aborted) break;
       turnIdx++;
 
@@ -496,7 +544,7 @@ export async function* runSession(
           book,
           meta.bookSlug,
           meta.sectionId,
-          meta.learnerId,
+          normalizeLearnerId(meta.learnerId),
           meta.pacing,
           coachAnalysis,
           meta.windowStartPage !== undefined && meta.windowEndPage !== undefined
@@ -588,7 +636,7 @@ export async function* runSession(
       let learnerSystem = await buildLearnerSystemPrompt(
         book,
         meta.sectionId,
-        meta.learnerId,
+        normalizeLearnerId(meta.learnerId),
         learnerCoachAnalysis,
       );
       if (learnerWindow.addendum) {
@@ -623,13 +671,56 @@ export async function* runSession(
 
       if (input.signal.aborted) break;
 
-      // ---- 双教练：并行 ----
-      const isLastTurn = turnIdx >= meta.maxTurns;
-      if (!isLastTurn && (meta.coachEnabled || meta.learnerCoachEnabled)) {
-        const coachPromises: Promise<void>[] = [];
+      // ---- 双教练 + 覆盖度追踪：并行 ----
+      const isLastTurn = turnIdx >= effectiveMax;
+      const runCoaches = !isLastTurn && (meta.coachEnabled || meta.learnerCoachEnabled);
+      const runCoverage = coverageItems.length > 0;
 
+      // 覆盖度追踪：字符串匹配 + LLM 语义兜底（与教练并行，返回值用 Promise 传回）
+      type CovResult = { items: CoverageItem[]; newlyCovered: string[]; stats: ReturnType<typeof coverageStats> };
+      const coveragePromise: Promise<CovResult | null> = runCoverage
+        ? (async (): Promise<CovResult | null> => {
+            // Tier 1: 字符串匹配（零 LLM 成本）
+            const { items: afterFuzzy, newlyCovered } = updateCoverage(coverageItems, teacherText, turnIdx);
+            coverageItems = afterFuzzy;
+            let result: CovResult | null = newlyCovered.length > 0
+              ? { items: coverageItems, newlyCovered, stats: coverageStats(coverageItems) }
+              : null;
+
+            // Tier 2: LLM 语义兜底——仅当字符串匹配本轮零收获 + 仍有未覆盖项时才触发
+            const stillUncovered = coverageItems.filter((i) => i.status === "uncovered");
+            if (newlyCovered.length === 0 && stillUncovered.length > 0) {
+              const llmMatched = await matchCoverageWithLLM(
+                teacherText,
+                stillUncovered,
+                input.signal,
+                recordUsage("coach", turnIdx),
+              );
+              if (llmMatched.length > 0) {
+                coverageItems = coverageItems.map((item) => {
+                  if (llmMatched.includes(item.id) && item.status === "uncovered") {
+                    return {
+                      ...item,
+                      status: "covered" as const,
+                      evidence: teacherText.length > 120 ? teacherText.slice(0, 120) + "…" : teacherText,
+                      coveredAtTurn: turnIdx,
+                    };
+                  }
+                  return item;
+                });
+                const allNew = [...new Set([...(result?.newlyCovered ?? []), ...llmMatched])];
+                result = { items: coverageItems, newlyCovered: allNew, stats: coverageStats(coverageItems) };
+              }
+            }
+            return result;
+          })()
+        : Promise.resolve(null);
+
+      const parallelTasks: Promise<unknown>[] = [coveragePromise];
+
+      if (runCoaches) {
         if (meta.coachEnabled) {
-          coachPromises.push(
+          parallelTasks.push(
             (async () => {
               const a = await analyzeWithCoach({
                 bookTitle: book.title,
@@ -648,12 +739,12 @@ export async function* runSession(
         }
 
         if (meta.learnerCoachEnabled) {
-          coachPromises.push(
+          parallelTasks.push(
             (async () => {
               const a = await analyzeLearnerWithCoach({
                 bookTitle: book.title,
                 sectionTitle,
-                learnerId: meta.learnerId,
+                learnerId: normalizeLearnerId(meta.learnerId),
                 pacing: meta.pacing,
                 turns,
                 signal: input.signal,
@@ -666,58 +757,79 @@ export async function* runSession(
             })(),
           );
         }
+      }
 
-        await Promise.allSettled(coachPromises);
+      await Promise.allSettled(parallelTasks);
 
-        // 事件放循环外让前端可以刷新
-        if (meta.coachEnabled && coachAnalysis) {
-          yield { type: "coach", turn: turnIdx, side: "teacher", analysis: coachAnalysis };
-        }
-        if (meta.learnerCoachEnabled && learnerCoachAnalysis) {
-          yield {
-            type: "coach",
-            turn: turnIdx,
-            side: "learner",
-            analysis: learnerCoachAnalysis,
-          };
-        }
+      // 推送覆盖度更新（从 coveragePromise 取回结果——不能在嵌套 async 里 yield）
+      const covResult = await coveragePromise;
+      if (covResult) {
+        await writeCoverage(meta.sid, covResult.items);
+        yield { type: "coverage_update" as const, items: covResult.items, newlyCovered: covResult.newlyCovered, stats: covResult.stats };
+      }
 
-        // ---- 自适应翻页 ----
-        // 仅当本节被分页 + 教师教练开着 + 已经有窗口时才考虑翻页
-        if (
-          meta.coachEnabled &&
-          coachAnalysis &&
-          meta.windowStartPage !== undefined &&
-          meta.windowEndPage !== undefined
-        ) {
-          const progress = coachAnalysis.contentProgress ?? "first_half";
-          recentProgress.push(progress);
-          if (recentProgress.length > PROGRESS_WINDOW) recentProgress.shift();
-          const nonFirst = recentProgress.filter((p) => p !== "first_half").length;
+      // 事件放循环外让前端可以刷新
+      if (meta.coachEnabled && coachAnalysis) {
+        yield { type: "coach", turn: turnIdx, side: "teacher", analysis: coachAnalysis };
+      }
+      if (meta.learnerCoachEnabled && learnerCoachAnalysis) {
+        yield {
+          type: "coach",
+          turn: turnIdx,
+          side: "learner",
+          analysis: learnerCoachAnalysis,
+        };
+      }
 
-          if (nonFirst >= PROGRESS_TRIGGER) {
-            // 检查是否还能翻
-            const pages = await getPages(meta.bookSlug, meta.sectionId);
-            if (pages && meta.windowEndPage < pages.length) {
-              const next = slideWindow(pages, {
-                startPage: meta.windowStartPage,
-                endPage: meta.windowEndPage,
-              });
-              if (next) {
-                meta.windowStartPage = next.startPage;
-                meta.windowEndPage = next.endPage;
-                recentProgress.length = 0; // 翻完页重置计数
-                await writeMeta(meta);
-                yield {
-                  type: "window_slide",
-                  turn: turnIdx,
-                  startPage: next.startPage,
-                  endPage: next.endPage,
-                  totalPages: pages.length,
-                };
-              }
+      // ---- 自适应翻页 ----
+      // 仅当本节被分页 + 教师教练开着 + 已经有窗口时才考虑翻页
+      if (
+        meta.coachEnabled &&
+        coachAnalysis &&
+        meta.windowStartPage !== undefined &&
+        meta.windowEndPage !== undefined
+      ) {
+        const progress = coachAnalysis.contentProgress ?? "first_half";
+        recentProgress.push(progress);
+        if (recentProgress.length > PROGRESS_WINDOW) recentProgress.shift();
+        const nonFirst = recentProgress.filter((p) => p !== "first_half").length;
+
+        if (nonFirst >= PROGRESS_TRIGGER) {
+          // 检查是否还能翻
+          const pages = await getPages(meta.bookSlug, meta.sectionId);
+          if (pages && meta.windowEndPage < pages.length) {
+            const next = slideWindow(pages, {
+              startPage: meta.windowStartPage,
+              endPage: meta.windowEndPage,
+            });
+            if (next) {
+              meta.windowStartPage = next.startPage;
+              meta.windowEndPage = next.endPage;
+              recentProgress.length = 0; // 翻完页重置计数
+              await writeMeta(meta);
+              yield {
+                type: "window_slide",
+                turn: turnIdx,
+                startPage: next.startPage,
+                endPage: next.endPage,
+                totalPages: pages.length,
+              };
             }
           }
+        }
+      }
+
+      // ---- 自动停：直到本节结束 ----
+      if (AUTO_STOP) {
+        const onLastPage = meta.windowEndPage !== undefined &&
+          teacherOriginWindow.totalPages > 0 &&
+          meta.windowEndPage >= teacherOriginWindow.totalPages;
+        const contentDone = coachAnalysis?.contentProgress === "done";
+        if (contentDone || (onLastPage && !meta.coachEnabled)) {
+          meta.maxTurns = turnIdx;
+          meta.status = "done";
+          await writeMeta(meta);
+          break;
         }
       }
 
@@ -763,6 +875,8 @@ export async function* runSession(
           promptTokens: cumPromptTokens,
           completionTokens: cumCompletionTokens,
           costCny: cumCostCny,
+          cacheHitTokens: cumCacheHitTokens > 0 ? cumCacheHitTokens : undefined,
+          cacheMissTokens: cumCacheMissTokens > 0 ? cumCacheMissTokens : undefined,
         };
       }
     }
