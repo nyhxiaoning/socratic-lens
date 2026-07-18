@@ -72,6 +72,14 @@ export function verifyCitation(snippet: string, sectionText: string): boolean {
 }
 
 /**
+ * 比 normalizeForMatch 更激进的规范化——再去掉所有标点，只留字母数字和中文。
+ * 用于模糊子串匹配（覆盖度追踪、知识点归页共用，保证口径一致）。
+ */
+export function fuzzyKey(s: string): string {
+  return normalizeForMatch(s).replace(/[^\w一-鿿]/g, "");
+}
+
+/**
  * 一次校验：给教师本轮说的文本 + 本节原文，返回该轮所有引用的命中情况。
  * 只校验 sectionId 匹配当前节的引用；跨节引用（我们目前限制本节）也标记为 miss。
  */

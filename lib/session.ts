@@ -8,14 +8,14 @@ import {
 } from "./coach";
 import { callLLM, type LLMUsage, type Purpose } from "./llm";
 import { verifyTurnCitations, type Citation } from "./citations";
-import { estimateCost } from "./pricing";
+import { makeCostEstimator } from "./pricing";
 import { getChecklist } from "./checklist";
-import { initCoverageState, updateCoverage, matchCoverageWithLLM, coverageStats, type CoverageItem } from "./coverage-tracker";
+import { initCoverageState, updateCoverage, matchCoverageWithLLM, coverageStats, assignPages, windowCoveredRatio, type CoverageItem } from "./coverage-tracker";
 import {
   buildLearnerMessages,
   buildLearnerSystemPrompt,
 } from "./learner";
-import { initialWindow, slideWindow } from "./pagination";
+import { slideWindow } from "./pagination";
 import {
   appendLine,
   ensureDir,
@@ -107,6 +107,25 @@ const CONTEXT_KEEP_CHARS_TEACHER = 60_000; // 教师侧对话上下文预算
 const CONTEXT_KEEP_CHARS_LEARNER = 40_000; // 学生侧预算（学生不需要看太多历史）
 const COMPRESS_TRIGGER_CHARS = 12_000; // 一段"待压缩"内容达到这个字符数就跑一次摘要
 const SUMMARY_MAX_CHARS = 1500; // 单份 lesson_summary 上限（超过就再压一遍）
+
+// ============================================================================
+// 自适应翻页参数（见 _dev/WINDOW-SLIDE-REDESIGN.md §4.5 / §6.5）
+// ============================================================================
+/** 翻页覆盖占比阈值，按 pacing 取——审细则近全覆盖才翻，审快则主干讲到就翻。 */
+const SLIDE_COVERAGE_THRESHOLD: Record<Pacing, number> = {
+  thorough: 0.95,
+  normal: 0.8,
+  express: 0.6,
+};
+/** 窗口内可定位知识点少于此数时，覆盖占比抖动大、不单独作数，交给教练信号兜。 */
+const SLIDE_MIN_LOCATABLE = 2;
+/**
+ * 同一窗口最多停留多少轮就强制翻页（安全网）。
+ * 治两类卡死：稀疏页（无可定位知识点 + 教练关）导致无信号；
+ * 以及教师啃不动某点、覆盖率永远到不了阈值导致的空转。
+ * 设得足够高，正常教学远用不到——它只在信号卡住时兜底。
+ */
+const SLIDE_MAX_DWELL = 12;
 
 // ============================================================================
 // 路径与 IO
@@ -347,6 +366,8 @@ export type StartSessionInput = {
 export async function* runSession(
   input: StartSessionInput,
 ): AsyncGenerator<SessionEvent> {
+  // 价格表预解析一次（运行时配置优先，回落 env）；循环内同步换算成本
+  const estimateCost = await makeCostEstimator();
   // ---- 初始化 meta 与状态 ----
   let meta: SessionMeta;
   let turns: Turn[];
@@ -429,6 +450,8 @@ export async function* runSession(
 
     // ---- 覆盖度追踪：加载知识点清单 ----
     let coverageItems: CoverageItem[] = [];
+    // 本节分页信息（用于知识点归页 + 翻页判据）。短节不分页则为 null。
+    const sectionPages = await getPages(meta.bookSlug, meta.sectionId);
     const checklist = await getChecklist(meta.bookSlug, meta.sectionId);
     if (checklist) {
       // Resume: 优先读落盘的覆盖状态（包含 LLM 匹配结果，重放恢复不全）
@@ -444,6 +467,11 @@ export async function* runSession(
             coverageItems = updated;
           }
         }
+      }
+      // 知识点归页（覆盖度驱动翻页的信号来源，见 §4.2）。归页幂等，resume 也重算，
+      // 兼容旧盘（旧 coverage.json 没有 pages 字段）。仅本节被分页时有意义。
+      if (sectionPages && sectionPages.length > 0) {
+        coverageItems = assignPages(coverageItems, sectionPages);
       }
       yield { type: "coverage_init", items: coverageItems };
       // 首次初始化后落盘，确保后续 resume 能直接读到
@@ -469,6 +497,8 @@ export async function* runSession(
     const recentProgress: ("first_half" | "second_half" | "done")[] = [];
     const PROGRESS_WINDOW = 4;
     const PROGRESS_TRIGGER = 2;
+    // 当前窗口已停留轮数（含 resume 无法精确恢复，从 0 起算——只影响本次续跑的兜底时机）。
+    let windowDwell = 0;
 
     // ---- usage 累计（本次 session）----
     let cumPromptTokens = 0;
@@ -781,40 +811,77 @@ export async function* runSession(
         };
       }
 
-      // ---- 自适应翻页 ----
-      // 仅当本节被分页 + 教师教练开着 + 已经有窗口时才考虑翻页
+      // ---- 自适应翻页（双信号：覆盖占比 + 教练节奏，见 §4）----
+      // 只要本节被分页 + 已有窗口就考虑翻页——不再绑定 coachEnabled。
       if (
-        meta.coachEnabled &&
-        coachAnalysis &&
+        sectionPages &&
+        sectionPages.length > 0 &&
         meta.windowStartPage !== undefined &&
-        meta.windowEndPage !== undefined
+        meta.windowEndPage !== undefined &&
+        meta.windowEndPage < sectionPages.length
       ) {
-        const progress = coachAnalysis.contentProgress ?? "first_half";
-        recentProgress.push(progress);
-        if (recentProgress.length > PROGRESS_WINDOW) recentProgress.shift();
-        const nonFirst = recentProgress.filter((p) => p !== "first_half").length;
+        // 信号一：教练节奏（教练开着才有）。维护 recentProgress 滑动计数。
+        let coachSaysAdvance = false;
+        let coachSignalAvailable = false;
+        if (meta.coachEnabled && coachAnalysis) {
+          coachSignalAvailable = true;
+          const progress = coachAnalysis.contentProgress ?? "first_half";
+          recentProgress.push(progress);
+          if (recentProgress.length > PROGRESS_WINDOW) recentProgress.shift();
+          coachSaysAdvance =
+            recentProgress.filter((p) => p !== "first_half").length >= PROGRESS_TRIGGER;
+        }
 
-        if (nonFirst >= PROGRESS_TRIGGER) {
-          // 检查是否还能翻
-          const pages = await getPages(meta.bookSlug, meta.sectionId);
-          if (pages && meta.windowEndPage < pages.length) {
-            const next = slideWindow(pages, {
-              startPage: meta.windowStartPage,
-              endPage: meta.windowEndPage,
-            });
-            if (next) {
-              meta.windowStartPage = next.startPage;
-              meta.windowEndPage = next.endPage;
-              recentProgress.length = 0; // 翻完页重置计数
-              await writeMeta(meta);
-              yield {
-                type: "window_slide",
-                turn: turnIdx,
-                startPage: next.startPage,
-                endPage: next.endPage,
-                totalPages: pages.length,
-              };
-            }
+        // 信号二：当前窗口覆盖占比（有清单才有）。窗口内可定位项太少则不作数。
+        let coverageSaysAdvance = false;
+        let coverageSignalAvailable = false;
+        if (coverageItems.length > 0) {
+          const { locatable, ratio } = windowCoveredRatio(
+            coverageItems,
+            meta.windowStartPage,
+            meta.windowEndPage,
+          );
+          if (locatable >= SLIDE_MIN_LOCATABLE) {
+            coverageSignalAvailable = true;
+            coverageSaysAdvance = ratio >= SLIDE_COVERAGE_THRESHOLD[meta.pacing];
+          }
+        }
+
+        windowDwell++;
+
+        // 决策：两个信号都可用时都要点头；只有一个可用则单信号定夺；都不可用不翻。
+        let shouldSlide = false;
+        if (coverageSignalAvailable && coachSignalAvailable) {
+          shouldSlide = coverageSaysAdvance && coachSaysAdvance;
+        } else if (coverageSignalAvailable) {
+          shouldSlide = coverageSaysAdvance;
+        } else if (coachSignalAvailable) {
+          shouldSlide = coachSaysAdvance;
+        }
+
+        // 安全网：在同一窗口停留过久（稀疏页无信号、或教师啃不动某点空转）就强制翻，防卡死漏审。
+        if (!shouldSlide && windowDwell >= SLIDE_MAX_DWELL) {
+          shouldSlide = true;
+        }
+
+        if (shouldSlide) {
+          const next = slideWindow(sectionPages, {
+            startPage: meta.windowStartPage,
+            endPage: meta.windowEndPage,
+          });
+          if (next) {
+            meta.windowStartPage = next.startPage;
+            meta.windowEndPage = next.endPage;
+            recentProgress.length = 0; // 翻完页重置教练计数
+            windowDwell = 0; // 翻完页重置停留计数
+            await writeMeta(meta);
+            yield {
+              type: "window_slide",
+              turn: turnIdx,
+              startPage: next.startPage,
+              endPage: next.endPage,
+              totalPages: sectionPages.length,
+            };
           }
         }
       }
@@ -825,7 +892,21 @@ export async function* runSession(
           teacherOriginWindow.totalPages > 0 &&
           meta.windowEndPage >= teacherOriginWindow.totalPages;
         const contentDone = coachAnalysis?.contentProgress === "done";
-        if (contentDone || (onLastPage && !meta.coachEnabled)) {
+        // 末页覆盖达标：本节最后一个窗口的知识点按 pacing 阈值讲透了
+        let lastPageCovered = false;
+        if (onLastPage && coverageItems.length > 0 &&
+            meta.windowStartPage !== undefined && meta.windowEndPage !== undefined) {
+          const { locatable, ratio } = windowCoveredRatio(
+            coverageItems, meta.windowStartPage, meta.windowEndPage,
+          );
+          lastPageCovered = locatable >= SLIDE_MIN_LOCATABLE &&
+            ratio >= SLIDE_COVERAGE_THRESHOLD[meta.pacing];
+        }
+        // 停止条件：教练判 done / 末页且覆盖达标 / 末页且既无教练又无清单 /
+        // 末页停留过久（稀疏末页或啃不动，兜底防跑满 200 轮空转）
+        const noSignals = !meta.coachEnabled && coverageItems.length === 0;
+        const lastPageStuck = onLastPage && windowDwell >= SLIDE_MAX_DWELL;
+        if (contentDone || lastPageCovered || (onLastPage && noSignals) || lastPageStuck) {
           meta.maxTurns = turnIdx;
           meta.status = "done";
           await writeMeta(meta);

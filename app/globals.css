@@ -83,3 +83,43 @@ select {
   border-radius: 6px;
   padding: 5px 8px;
 }
+
+/* 主工作区：宽屏多列（对话 + 可选侧栏），窄屏堆叠成单列并自适应高度 */
+.workspace {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 900px) {
+  .workspace {
+    height: calc(100vh - 300px);
+    min-height: 320px;
+  }
+  .workspace[data-coach="true"][data-coverage="true"] {
+    grid-template-columns: minmax(0, 1fr) 320px 280px;
+  }
+  .workspace[data-coach="true"][data-coverage="false"] {
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+  .workspace[data-coach="false"][data-coverage="true"] {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+
+/* 窄屏：对话区给一个可用高度，侧栏依内容自然展开 */
+@media (max-width: 899px) {
+  .workspace > :first-child {
+    min-height: 50vh;
+  }
+  .workspace .side-panel {
+    max-height: 60vh;
+  }
+}
+
+/* 小屏减小页面内边距，避免挤 */
+@media (max-width: 599px) {
+  .app-main {
+    padding: 12px 12px !important;
+  }
+}

@@ -37,6 +37,8 @@ type ControlsProps = {
   onStop: () => void;
   onHistory: () => void;
   onUpload: () => void;
+  onConfig: () => void;
+  healthConfigured: boolean | null;
   // 批量矩阵
   batchMode: boolean;
   onBatchMode: (v: boolean) => void;
@@ -105,7 +107,7 @@ export function Controls(p: ControlsProps) {
 
       {!p.batchMode ? (
         <>
-          <Field label="学生">
+      <Field label="学生类型" help="模拟不同投入程度的学生。学生看不到原文，只能从老师的话里学，用来逼出书/教学的覆盖缺口。">
             <select
               value={p.learnerId}
               onChange={(e) => p.onLearnerId(e.target.value as LearnerId)}
@@ -119,7 +121,7 @@ export function Controls(p: ControlsProps) {
             </select>
           </Field>
 
-          <Field label="节奏">
+          <Field label="讲课快慢" help="教师推进的节奏：细讲会多复述多举例，快讲直奔核心。">
             <select
               value={p.pacing}
               onChange={(e) => p.onPacing(e.target.value as Pacing)}
@@ -135,7 +137,7 @@ export function Controls(p: ControlsProps) {
         </>
       ) : (
         <>
-          <Field label="学生（多选）">
+          <Field label="学生类型（多选）" help="批量模式下选中的每种学生都会各跑一遍。">
             <div style={{ display: "flex", gap: 8, alignItems: "center", height: 30 }}>
               {LEARNERS.map((l) => (
                 <label
@@ -155,7 +157,7 @@ export function Controls(p: ControlsProps) {
             </div>
           </Field>
 
-          <Field label="节奏（多选）">
+          <Field label="讲课快慢（多选）" help="批量模式下每种节奏都会各跑一遍，与学生类型组合成矩阵。">
             <div style={{ display: "flex", gap: 8, alignItems: "center", height: 30 }}>
               {PACINGS.map((pc) => (
                 <label
@@ -177,7 +179,7 @@ export function Controls(p: ControlsProps) {
         </>
       )}
 
-      <Field label="教练">
+      <Field label="AI 教练修正" help="每轮结束后台各跑一次分析：教师教练纠正讲法，学生教练判断学生是不是真懂、有没有靠预训练作弊。分析会注入下一轮，让对话更真实。默认全开。">
         <select
           value={coachMode}
           onChange={(e) => {
@@ -194,7 +196,7 @@ export function Controls(p: ControlsProps) {
         </select>
       </Field>
 
-      <Field label="轮数">
+      <Field label="轮数" help="教师说一轮、学生跟一轮算一轮。选「直到本节结束」会讲完自动停。">
         <select
           value={p.maxTurns}
           onChange={(e) => p.onMaxTurns(Number(e.target.value))}
@@ -210,7 +212,7 @@ export function Controls(p: ControlsProps) {
 
       <div style={{ flex: 1 }} />
 
-      <Field label="批量">
+      <Field label="批量矩阵" help="同一节 × 多种学生 × 多种节奏，串行跑完后可一起送审，方便横向对比。">
         <label
           style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, cursor: "pointer", height: 30 }}
           title="同一节 × 多画像 × 多节奏，串行跑完后可一起送审"
@@ -229,6 +231,25 @@ export function Controls(p: ControlsProps) {
         <>
           <button onClick={p.onUpload}>上传书…</button>
           <button onClick={p.onHistory}>历史…</button>
+          <button onClick={p.onConfig} title="配置大模型接口（BASE_URL / API Key / 模型）">
+            <span
+              style={{
+                display: "inline-block",
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                marginRight: 6,
+                verticalAlign: "middle",
+                background:
+                  p.healthConfigured === null
+                    ? "var(--muted)"
+                    : p.healthConfigured
+                      ? "var(--accent)"
+                      : "var(--danger)",
+              }}
+            />
+            连接设置
+          </button>
           {p.batchMode ? (
             <button
               className="primary"

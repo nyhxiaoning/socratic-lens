@@ -7,9 +7,11 @@ import { CoachSidebar } from "@/components/CoachSidebar";
 import { CoverageSidebar } from "@/components/CoverageSidebar";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
 import { UploadBook } from "@/components/UploadBook";
+import { ConnectionSettings } from "@/components/ConnectionSettings";
 import { AuditPicker, AuditView } from "@/components/AuditPanel";
 import { Controls } from "@/components/Controls";
 import { useSession } from "@/components/useSession";
+import { AUDIT_DIMENSIONS } from "@/components/types";
 import type { BookSummary } from "@/components/types";
 
 export default function Page() {
@@ -17,24 +19,64 @@ export default function Page() {
   const [showCoach, setShowCoach] = useState<boolean>(false);
   const [showCoverage, setShowCoverage] = useState<boolean>(true);
   const [coachTab, setCoachTab] = useState<"teacher" | "learner">("teacher");
+  const [showRunInfo, setShowRunInfo] = useState<boolean>(false);
 
-  const showSidebar =
-    showCoach &&
-    (s.coachEnabled ||
-      s.learnerCoachEnabled ||
-      s.coachHistory.length > 0 ||
-      s.learnerCoachHistory.length > 0);
-
+  const canShowCoach =
+    s.coachEnabled ||
+    s.learnerCoachEnabled ||
+    s.coachHistory.length > 0 ||
+    s.learnerCoachHistory.length > 0;
+  const showSidebar = showCoach && canShowCoach;
   const showCoverageSidebar = showCoverage;
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
+    <main className="app-main" style={{ maxWidth: 1100, margin: "0 auto", padding: "16px 20px" }}>
       <header style={{ marginBottom: 12 }}>
         <h1 style={{ margin: 0, fontSize: 18 }}>教·学·审 观察台</h1>
         <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>
-          知识点覆盖不到的，教师讲不到的，都是你的书需要调整的。
+          让两个 AI（老师 + 学生）拿你的书上一节课，你在旁边看、并给书打分。知识点覆盖不到的、教师讲不到的，都是你的书要调整的地方。
         </p>
       </header>
+
+      {s.health && !s.health.configured && (
+        <div
+          style={{
+            padding: "12px 14px",
+            marginBottom: 12,
+            border: "1px solid var(--accent)",
+            borderRadius: 8,
+            background: "var(--panel)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: 13 }}>
+            👋 第一步：先配置大模型接口（BASE_URL / API Key / 模型），才能开始跑课。
+          </span>
+          <button className="primary" onClick={() => s.setShowConfig(true)}>
+            去配置连接
+          </button>
+        </div>
+      )}
+
+      {s.notice && (
+        <div
+          style={{
+            padding: "8px 12px",
+            marginBottom: 12,
+            fontSize: 13,
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            background: "var(--panel)",
+            color: "var(--muted)",
+          }}
+        >
+          ⏳ {s.notice}
+        </div>
+      )}
 
       <Controls
         books={s.books}
@@ -62,6 +104,8 @@ export default function Page() {
         onStop={s.stop}
         onHistory={s.openHistory}
         onUpload={() => s.setShowUpload(true)}
+        onConfig={() => s.setShowConfig(true)}
+        healthConfigured={s.health ? s.health.configured : null}
         batchMode={s.batchMode}
         onBatchMode={s.setBatchMode}
         selectedLearners={s.selectedLearners}
@@ -158,16 +202,40 @@ export default function Page() {
 
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: [
-            "1fr",
-            showSidebar ? "320px" : null,
-            showCoverageSidebar ? "280px" : null,
-          ].filter(Boolean).join(" "),
-          gap: 12,
-          height: "calc(100vh - 280px)",
-          minHeight: 300,
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          marginBottom: 8,
+          fontSize: 12,
+          color: "var(--muted)",
+          flexWrap: "wrap",
         }}
+      >
+        <span>侧栏：</span>
+        {canShowCoach && (
+          <button
+            onClick={() => setShowCoach((v) => !v)}
+            className={showSidebar ? "primary" : undefined}
+            style={{ fontSize: 12, padding: "3px 10px" }}
+            title="教师/学生教练每轮的后台分析"
+          >
+            {showSidebar ? "✓ " : ""}教练分析
+          </button>
+        )}
+        <button
+          onClick={() => setShowCoverage((v) => !v)}
+          className={showCoverageSidebar ? "primary" : undefined}
+          style={{ fontSize: 12, padding: "3px 10px" }}
+          title="实时知识点覆盖度标注"
+        >
+          {showCoverageSidebar ? "✓ " : ""}知识点覆盖
+        </button>
+      </div>
+
+      <div
+        className="workspace"
+        data-coach={showSidebar ? "true" : "false"}
+        data-coverage={showCoverageSidebar ? "true" : "false"}
       >
         <ChatView
           ref={s.scrollRef}
@@ -193,23 +261,6 @@ export default function Page() {
           stats={s.coverageStats}
           onCollapse={() => setShowCoverage(false)}
         />
-
-        {(s.coachEnabled || s.learnerCoachEnabled) && !showCoach && (
-          <button
-            onClick={() => setShowCoach(true)}
-            style={{ position: "absolute", right: 20, top: 210, fontSize: 11, padding: "2px 8px" }}
-          >
-            显示教练
-          </button>
-        )}
-        {s.coverageItems.length > 0 && !showCoverage && (
-          <button
-            onClick={() => setShowCoverage(true)}
-            style={{ position: "absolute", right: showSidebar ? 340 : 20, top: 210, fontSize: 11, padding: "2px 8px" }}
-          >
-            显示覆盖
-          </button>
-        )}
       </div>
 
       <footer
@@ -226,25 +277,17 @@ export default function Page() {
       >
         <span>
           {s.sid ? `会话 ${s.sid}` : "尚未开始"}
-          {s.windowInfo && s.windowInfo.totalPages > 0 && (
-            <>
-              {" · "}
-              <span title="教师当前看到的原文范围（自适应翻页）">
-                窗口 页 {s.windowInfo.startPage}–{s.windowInfo.endPage} / {s.windowInfo.totalPages}
-              </span>
-            </>
-          )}
           {s.usage.promptTokens > 0 && (
-            <span title="本次会话累计 token 用量与估算成本">
-              {" · "}in: {s.usage.promptTokens} · out: {s.usage.completionTokens}
-              {s.usage.cacheHitTokens > 0 && (
-                <> · 🟢缓存命中: {s.usage.cacheHitTokens}</>
-              )}
-              {s.usage.cacheMissTokens > 0 && (
-                <> · 🔴缓存未命中: {s.usage.cacheMissTokens}</>
-              )}
+            <>
               {" · "}¥{s.usage.costCny.toFixed(4)}
-            </span>
+              <button
+                onClick={() => setShowRunInfo((v) => !v)}
+                style={{ marginLeft: 8, fontSize: 11, padding: "1px 8px" }}
+                title="token 用量、缓存命中、翻页窗口等运行细节"
+              >
+                {showRunInfo ? "隐藏运行信息" : "运行信息"}
+              </button>
+            </>
           )}
         </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -276,7 +319,35 @@ export default function Page() {
         </div>
       </footer>
 
-      {s.showAuditPanel && !s.auditing && !s.auditText && (
+      {showRunInfo && s.usage.promptTokens > 0 && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: "8px 12px",
+            fontSize: 12,
+            color: "var(--muted)",
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            display: "flex",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          <span>输入 token：{s.usage.promptTokens}</span>
+          <span>输出 token：{s.usage.completionTokens}</span>
+          {s.usage.cacheHitTokens > 0 && <span>🟢 缓存命中：{s.usage.cacheHitTokens}</span>}
+          {s.usage.cacheMissTokens > 0 && <span>🔴 缓存未命中：{s.usage.cacheMissTokens}</span>}
+          <span>估算成本：¥{s.usage.costCny.toFixed(4)}</span>
+          {s.windowInfo && s.windowInfo.totalPages > 0 && (
+            <span title="教师当前看到的原文范围（自适应翻页）">
+              翻页窗口：第 {s.windowInfo.startPage}–{s.windowInfo.endPage} 页 / 共 {s.windowInfo.totalPages} 页
+            </span>
+          )}
+        </div>
+      )}
+
+      {s.showAuditPanel && !s.auditing && (
         <AuditPicker
           book={s.currentBookStat}
           currentSid={s.sid}
@@ -292,6 +363,7 @@ export default function Page() {
           checklistStatus={s.checklistStatus}
           generatingSections={s.generatingSections}
           onGenerateChecklist={s.generateChecklist}
+          currentAuditId={s.currentAuditId}
         />
       )}
 
@@ -318,10 +390,30 @@ export default function Page() {
             }}
           >
             <span>
-              审计报告 · {s.auditDimension === "teacher" ? "教师教学质量" : "书质量"}
+              审计报告 · {AUDIT_DIMENSIONS.find(x => x.id === s.auditDimension)?.label ?? s.auditDimension}
               {s.auditing && "（生成中…）"}
+              {s.currentAuditId && (
+                <button
+                  onClick={() => navigator.clipboard?.writeText(s.currentAuditId)}
+                  title="点击复制审计编号"
+                  style={{
+                    marginLeft: 8,
+                    fontSize: 11,
+                    padding: "1px 8px",
+                    fontFamily: "monospace",
+                    color: "var(--accent)",
+                  }}
+                >
+                  #{s.currentAuditId} ⧉
+                </button>
+              )}
             </span>
-            {!s.auditing && <button onClick={s.reopenAudit}>重开一次</button>}
+            {!s.auditing && (
+              <span style={{ display: "flex", gap: 8 }}>
+                <button onClick={s.reopenAudit}>重开一次</button>
+                <button onClick={s.closeAudit} title="收起当前报告（不删除已保存的报告）">关闭报告</button>
+              </span>
+            )}
           </div>
           <AuditView raw={s.auditText} />
         </section>
@@ -350,6 +442,13 @@ export default function Page() {
             s.setShowUpload(false);
             void s.refreshBooks(slug);
           }}
+        />
+      )}
+
+      {s.showConfig && (
+        <ConnectionSettings
+          onClose={() => s.setShowConfig(false)}
+          onSaved={() => void s.refreshHealth()}
         />
       )}
 
@@ -387,3 +486,4 @@ function auditRecommendation(book: BookSummary): string {
   }
   return `全书约 ${formatChars(total)}，${nSec} 节 —— 每次审计只挑一节，或者最多 2 节。合审全书不现实。`;
 }
+

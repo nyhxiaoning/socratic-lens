@@ -24,6 +24,7 @@ export function AuditPicker({
   checklistStatus,
   generatingSections,
   onGenerateChecklist,
+  currentAuditId,
 }: {
   book: BookSummary | undefined;
   currentSid: string;
@@ -39,6 +40,7 @@ export function AuditPicker({
   checklistStatus?: Record<string, { exists: boolean; itemCount?: number }>;
   generatingSections?: Set<string>;
   onGenerateChecklist?: (sectionId: string) => void;
+  currentAuditId?: string;
 }) {
   const grouped = useMemo(() => {
     const map = new Map<string, SessionListItem[]>();
@@ -56,6 +58,9 @@ export function AuditPicker({
   // Fidelity 样本选择
   const [samples, setSamples] = useState<{ name: string; hasSource: boolean; hasSynth: boolean }[]>([]);
   const [selectedSample, setSelectedSample] = useState<string>("");
+  const [showAdvancedDims, setShowAdvancedDims] = useState<boolean>(
+    dimension === "fidelity" || dimension === "coverage",
+  );
   useEffect(() => {
     if (dimension === "fidelity" || dimension === "coverage") {
       fetch("/api/fidelity-samples")
@@ -98,37 +103,60 @@ export function AuditPicker({
         </div>
       </div>
 
-      {/* 审计维度切换 */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        {AUDIT_DIMENSIONS.map((d) => (
+      {/* 审计维度切换：基础常显，高级折叠 */}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {AUDIT_DIMENSIONS.filter((d) => d.tier === "basic").map((d) => (
+            <button
+              key={d.id}
+              onClick={() => onDimension(d.id)}
+              className={dimension === d.id ? "primary" : undefined}
+              style={{ fontSize: 13 }}
+            >
+              {d.label}
+            </button>
+          ))}
           <button
-            key={d.id}
-            onClick={() => onDimension(d.id)}
-            title={d.desc}
-            className={dimension === d.id ? "primary" : undefined}
-            style={{ fontSize: 12 }}
+            onClick={() => setShowAdvancedDims((v) => !v)}
+            style={{ fontSize: 12, padding: "3px 10px", marginLeft: 4 }}
           >
-            {d.label}
-            {d.id === "fidelity" && (
-              <span
-                style={{
-                  fontSize: 9,
-                  color: "var(--muted)",
-                  border: "1px solid var(--muted)",
-                  borderRadius: 3,
-                  padding: "0 4px",
-                  marginLeft: 4,
-                  verticalAlign: "top",
-                }}
-              >
-                实验性
-              </span>
-            )}
+            {showAdvancedDims ? "▾ 高级" : "▸ 高级"}
           </button>
-        ))}
-        <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
-          {AUDIT_DIMENSIONS.find((x) => x.id === dimension)?.desc}
-        </span>
+          {showAdvancedDims &&
+            AUDIT_DIMENSIONS.filter((d) => d.tier === "advanced").map((d) => (
+              <button
+                key={d.id}
+                onClick={() => onDimension(d.id)}
+                className={dimension === d.id ? "primary" : undefined}
+                style={{ fontSize: 13 }}
+              >
+                {d.label}
+              </button>
+            ))}
+        </div>
+        {/* 当前维度：能看出什么 + 前提 */}
+        <div
+          style={{
+            marginTop: 8,
+            padding: "8px 10px",
+            fontSize: 12,
+            lineHeight: 1.6,
+            color: "var(--muted)",
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+          }}
+        >
+          <div>
+            <strong style={{ color: "var(--text)" }}>能看出什么：</strong>
+            {AUDIT_DIMENSIONS.find((x) => x.id === dimension)?.outcome}
+          </div>
+          {AUDIT_DIMENSIONS.find((x) => x.id === dimension)?.requires && (
+            <div style={{ marginTop: 4, color: "var(--accent)" }}>
+              前提：{AUDIT_DIMENSIONS.find((x) => x.id === dimension)?.requires}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Fidelity 保真度：选样本 */}
@@ -267,7 +295,7 @@ export function AuditPicker({
                           {s.sid === currentSid && "（本次）"}
                         </span>
                         <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
-                          {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+                          {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} · {s.pacing ?? ""} · {s.turnsSoFar ?? 0}/{s.maxTurns ?? "?"}轮 ·{" "}
                           {s.status}
                         </span>
                       </label>
@@ -331,6 +359,8 @@ export function AuditPicker({
                       </span>
                       <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
                         {LEARNERS.find((l) => l.id === s.learnerId)?.label ?? s.learnerId} ·{" "}
+                        {s.pacing ?? ""} ·{" "}
+                        {s.turnsSoFar ?? 0}/{s.maxTurns ?? "?"}轮 ·{" "}
                         {s.status}
                       </span>
                     </label>
@@ -372,7 +402,7 @@ export function AuditPicker({
                   textAlign: "left",
                   padding: "4px 6px",
                   fontSize: 12,
-                  background: "transparent",
+                  background: h.aid === currentAuditId ? "var(--teacher)" : "transparent",
                   border: "none",
                   borderBottom: "1px solid var(--border)",
                   cursor: "pointer",
@@ -389,6 +419,17 @@ export function AuditPicker({
                 </span>
                 <span style={{ color: "var(--muted)" }}>
                   {h.sectionIds.map((s) => "§" + s).join(" ")} · {h.sidCount} 会话
+                </span>
+                <span
+                  style={{
+                    marginLeft: 6,
+                    fontFamily: "monospace",
+                    fontSize: 11,
+                    color: h.aid === currentAuditId ? "var(--accent)" : "var(--muted)",
+                    opacity: 0.75,
+                  }}
+                >
+                  #{h.aid}
                 </span>
                 {h.verdict && (
                   <span style={{ display: "block", color: "var(--muted)", opacity: 0.85 }}>

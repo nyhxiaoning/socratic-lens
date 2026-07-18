@@ -29,18 +29,13 @@
 ## 快速开始
 
 ```bash
-npm install                     # 安装依赖（首次必须）
-cp .env.example .env.local      # 创建配置，填入你的 API key
-npx next dev                    # 启动 → http://localhost:3000
+npm install       # 安装依赖（首次必须）
+npx next dev      # 启动 → http://localhost:3000
 ```
 
-`.env.local` 最小配置（支持任意 OpenAI 兼容端点）：
+启动后打开页面，点右上角 **「连接设置」** 填入你的大模型接口（任意 OpenAI 兼容端点）：BASE_URL、API Key、模型名，点「测试连接」确认能通就保存。配置会写到 `data/config.json`（只在本机），不必手动改 `.env.local`。
 
-```env
-LLM_BASE_URL=https://api.deepseek.com
-LLM_API_KEY=sk-xxx
-LLM_MODEL=deepseek-v4-flash
-```
+> 也可以走环境变量：`cp .env.example .env.local` 后填 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`。页面里的连接设置优先级高于环境变量，两者留空的字段会自动回落。
 
 ## 功能概览
 

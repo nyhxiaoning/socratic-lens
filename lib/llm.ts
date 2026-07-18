@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { resolveConnection, resolveModel, usesAuditEndpoint } from "./config";
 
 export type Purpose = "teacher" | "learner" | "audit" | "coach";
 
@@ -37,37 +38,54 @@ export type ToolDef = {
   parameters: Record<string, unknown>;
 };
 
-function requireEnv(key: string): string {
-  const v = process.env[key];
-  if (!v) throw new Error(`环境变量缺失：${key}（复制 .env.example 到 .env.local 并填入）`);
-  return v;
+/** 该 purpose 该用哪个模型（运行时配置优先，回落环境变量）。 */
+export async function pickModel(purpose: Purpose): Promise<string> {
+  return resolveModel(purpose);
 }
 
-export function pickModel(purpose: Purpose): string {
-  if (purpose === "audit") {
-    const auditModel = process.env.LLM_AUDIT_MODEL || process.env.LLM_MODEL_AUDIT;
-    if (auditModel) return auditModel;
-    return requireEnv("LLM_MODEL");
-  }
-  const override = process.env[`LLM_MODEL_${purpose.toUpperCase()}`];
-  return override || requireEnv("LLM_MODEL");
-}
-
+// 客户端按 baseURL+apiKey 组合缓存；配置一改就要失效（见 resetClientCache）。
 const clientCache = new Map<string, OpenAI>();
-export function getClient(purpose: Purpose): OpenAI {
-  // audit 若配了独立端点，用独立 key + baseURL；否则回落共享
-  const useAudit = purpose === "audit" && !!process.env.LLM_AUDIT_BASE_URL;
-  const baseURL = useAudit
-    ? requireEnv("LLM_AUDIT_BASE_URL")
-    : requireEnv("LLM_BASE_URL");
-  const apiKey = useAudit
-    ? (process.env.LLM_AUDIT_API_KEY || requireEnv("LLM_API_KEY"))
-    : requireEnv("LLM_API_KEY");
-  const cached = clientCache.get(baseURL);
+export async function getClient(purpose: Purpose): Promise<OpenAI> {
+  const { baseUrl, apiKey } = await resolveConnection(purpose);
+  const key = `${baseUrl}\u0000${apiKey}`;
+  const cached = clientCache.get(key);
   if (cached) return cached;
-  const client = new OpenAI({ apiKey, baseURL });
-  clientCache.set(baseURL, client);
+  const client = new OpenAI({ apiKey, baseURL: baseUrl });
+  clientCache.set(key, client);
   return client;
+}
+
+/** 连接配置变更后调用：丢掉带旧 key/baseURL 的客户端缓存。 */
+export function resetClientCache(): void {
+  clientCache.clear();
+}
+
+/**
+ * 用「显式给定」的连接参数发一个极小请求，验证能否连通。
+ * 不经过 config.json、不写盘、不污染已保存配置——纯探活。
+ */
+export async function testConnection(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+): Promise<{ ok: true; reply: string } | { ok: false; error: string }> {
+  try {
+    const client = new OpenAI({ apiKey, baseURL: baseUrl });
+    const extraBody: Record<string, unknown> = /deepseek/i.test(model)
+      ? { thinking: { type: "disabled" } }
+      : {};
+    const resp = await client.chat.completions.create({
+      model,
+      messages: [{ role: "user", content: "ping，只回复 pong" }],
+      max_tokens: 8,
+      temperature: 0,
+      ...extraBody,
+    });
+    const reply = resp.choices?.[0]?.message?.content ?? "";
+    return { ok: true, reply: (reply || "").slice(0, 40) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** 从 OpenAI 兼容 usage 对象提取用量（含 DeepSeek 缓存命中字段）。 */
@@ -133,19 +151,19 @@ export function callLLM(
   messages: LLMMessage[],
   opts: LLMOptions = {},
 ): Promise<string> | AsyncIterable<string> {
-  const client = getClient(purpose);
-  const model = pickModel(purpose);
   const inputChars = messages.reduce((s, m) => s + m.content.length, 0);
   const t0 = Date.now();
 
   const sdkMessages = messages as ChatCompletionMessageParam[];
-  // DeepSeek 模型默认关闭 thinking（教学/审计场景不需要扩展推理，浪费 token 且破坏结构化输出）
-  const extraBody: Record<string, unknown> = /deepseek/i.test(model)
-    ? { thinking: { type: "disabled" } }
-    : {};
 
   if (opts.stream) {
     return (async function* () {
+      const client = await getClient(purpose);
+      const model = await pickModel(purpose);
+      // DeepSeek 模型默认关闭 thinking（教学/审计场景不需要扩展推理，浪费 token 且破坏结构化输出）
+      const extraBody: Record<string, unknown> = /deepseek/i.test(model)
+        ? { thinking: { type: "disabled" } }
+        : {};
       let outputChars = 0;
       let usage: LLMUsage | undefined;
       const stream = await client.chat.completions.create(
@@ -179,6 +197,11 @@ export function callLLM(
   }
 
   return (async () => {
+    const client = await getClient(purpose);
+    const model = await pickModel(purpose);
+    const extraBody: Record<string, unknown> = /deepseek/i.test(model)
+      ? { thinking: { type: "disabled" } }
+      : {};
     // 一些模型（如 DeepSeek v4 flash）的 json_object mode 返回空内容。
     // 检测到已知不兼容的模型时跳过 response_format，靠 prompt 约束保 JSON 输出。
     const skipJsonResp = opts.jsonMode && /deepseek/i.test(model);
@@ -218,8 +241,8 @@ export async function callLLMWithTool(
   tool: ToolDef,
   opts: LLMOptions = {},
 ): Promise<Record<string, unknown>> {
-  const client = getClient(purpose);
-  const model = pickModel(purpose);
+  const client = await getClient(purpose);
+  const model = await pickModel(purpose);
   const inputChars = messages.reduce((s, m) => s + m.content.length, 0);
   const t0 = Date.now();
 

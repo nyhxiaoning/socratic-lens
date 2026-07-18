@@ -3,7 +3,7 @@ import { BookManifest, getPages, getSection, getSectionTitle } from "./book";
 import type { CoachAnalysis } from "./coach";
 import { renderCoachBlock } from "./coach";
 import { LLMMessage } from "./llm";
-import { renderWindow } from "./pagination";
+import { initialWindow, renderWindow } from "./pagination";
 import { PROMPTS_ROOT, readText } from "./storage";
 
 export type LearnerId = "passive" | "moderate" | "active";
@@ -66,8 +66,10 @@ export async function buildTeacherSystemPrompt(
     sectionBlock = `## 本节原文（唯一允许引用的文本，逐字引）\n\n--- 第 §${sectionId} 部分 ---\n${fullText}\n--- 本节完 ---`;
     winInfo = { paginated: false, startPage: 1, endPage: 1, totalPages: 1 };
   } else {
-    const start = window?.startPage ?? 1;
-    const end = window?.endPage ?? Math.min(pages.length, 4);
+    // 初始窗口按字符预算算（initialWindow），不再写死前 4 页；resume 时用传入的 window。
+    const initial = initialWindow(pages);
+    const start = window?.startPage ?? initial.startPage;
+    const end = window?.endPage ?? Math.max(initial.endPage, 1);
     const windowText = renderWindow(pages, start, end);
     const isFirstWindow = start === 1;
     const isLastWindow = end >= pages.length;

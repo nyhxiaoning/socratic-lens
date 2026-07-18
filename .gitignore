@@ -12,6 +12,9 @@ data/audits/
 /data/checklists/
 /data/fidelity/
 
+# 运行时连接配置（含 API key），绝不入库
+/data/config.json
+
 # 允许提交 example 和 book，其它 slug 的书忽略
 data/books/*
 !data/books/example
@@ -27,7 +30,9 @@ data/books/**/*.pages.json
 .omo/
 
 # 内部开发文档，不公开
-
 _dev/
-
 CLAUDE.md
+
+docs/
+
+AGENTS.md

@@ -4,9 +4,10 @@
  *   1. 字符串 fuzzy 匹配（引用标记 + 全文，零 LLM 成本）
  *   2. LLM 语义匹配（口语化表达兜底，捕捉字符串匹配漏掉的覆盖）
  */
-import { extractCitations, normalizeForMatch } from "./citations";
+import { extractCitations, fuzzyKey } from "./citations";
 import { callLLM, type LLMUsage } from "./llm";
 import type { Checklist, KnowledgePoint, Criterion, Exercise, ErrorSpot } from "./fidelity";
+import { locateQuotePages, type Page } from "./pagination";
 
 export type CoverageCategory = "knowledgePoint" | "criteria" | "exercise" | "errorSpot";
 
@@ -21,6 +22,11 @@ export type CoverageItem = {
   evidence?: string;
   /** 哪一轮被首次覆盖。 */
   coveredAtTurn?: number;
+  /**
+   * 该知识点归属的页号（升序，允许多页）。空数组=无法定位到任何页。
+   * undefined=尚未归页（本节未分页或未调用 assignPages）。见 §4.2。
+   */
+  pages?: number[];
 };
 
 const CATEGORY_LABEL: Record<CoverageCategory, string> = {
@@ -61,13 +67,6 @@ export function initCoverageState(checklist: Checklist): CoverageItem[] {
     ...toItems(checklist.exercises, "exercise"),
     ...toItems(checklist.errorSpots, "errorSpot"),
   ];
-}
-
-/** 规范化一段文本为可用于包含匹配的形式。比 normalizeForMatch 更激进——去掉所有标点。 */
-function fuzzyKey(s: string): string {
-  const base = normalizeForMatch(s);
-  // 去掉所有非字母数字和中文字符
-  return base.replace(/[^\w一-鿿]/g, "");
 }
 
 /**
@@ -215,4 +214,41 @@ export function coverageStats(items: CoverageItem[]) {
     });
   }
   return { total, covered, byCategory };
+}
+
+// ============================================================================
+// 归页 + 窗口覆盖占比（自适应翻页信号，见 _dev/WINDOW-SLIDE-REDESIGN.md §4）
+// ============================================================================
+
+/**
+ * 给每个 CoverageItem 填 `pages`（该知识点归属的页号）。
+ * 纯函数，不改状态位，只补归页信息。本节未分页时不应调用。
+ */
+export function assignPages(items: CoverageItem[], pages: Page[]): CoverageItem[] {
+  return items.map((item) => ({
+    ...item,
+    pages: locateQuotePages(pages, item.sourceQuote),
+  }));
+}
+
+/**
+ * 当前窗口 [startPage, endPage] 的覆盖占比（翻页判据，见 §4.1 / §4.3）。
+ *
+ * 只统计 `pages` 与窗口有交集**且已成功归页**的项（`pages` 非空）。
+ * 返回：
+ *   - locatable：窗口内可定位的项数（分母，供降级判断——太少则不单独信占比）
+ *   - covered：其中已 covered 的项数
+ *   - ratio：covered / locatable（locatable=0 时为 0）
+ */
+export function windowCoveredRatio(
+  items: CoverageItem[],
+  startPage: number,
+  endPage: number,
+): { locatable: number; covered: number; ratio: number } {
+  const inWindow = items.filter(
+    (i) => i.pages != null && i.pages.some((p) => p >= startPage && p <= endPage),
+  );
+  const covered = inWindow.filter((i) => i.status === "covered").length;
+  const locatable = inWindow.length;
+  return { locatable, covered, ratio: locatable === 0 ? 0 : covered / locatable };
 }
