@@ -6,12 +6,12 @@
 #   bash scripts/sync-to-public.sh <commit-hash>     只 cherry-pick 一个 commit
 #   bash scripts/sync-to-public.sh <a>..<b>          只 cherry-pick 一段 range
 #
-# 内部文件（_dev/、CLAUDE.md）在 public 上会被自动移除。
+# 内部文件（_dev/、docs/、CLAUDE.md、AGENTS.md）在 public 上会被自动移除。
 
 set -euo pipefail
 
-INTERNAL_FILES=("_dev" "CLAUDE.md" "scripts/sync-to-public.sh")
-GITIGNORE_GUARD_LINES=("# 内部开发文档，不公开" "_dev/" "CLAUDE.md")
+INTERNAL_FILES=("_dev" "docs" "CLAUDE.md" "AGENTS.md" "scripts/sync-to-public.sh")
+GITIGNORE_GUARD_LINES=("# 内部开发文档，不公开" "_dev/" "docs/" "CLAUDE.md" "AGENTS.md")
 
 echo "=== 同步 master → public ==="
 
@@ -86,7 +86,7 @@ done
 if git diff --cached --quiet 2>/dev/null; then
   echo "没有新的改动需要提交"
 else
-  git commit -m "sync: master → public (auto-strip _dev/ CLAUDE.md)"
+  git commit -m "sync: master → public (auto-strip _dev/ docs/ CLAUDE.md AGENTS.md)"
   echo "✅ sync committed"
 fi
 
