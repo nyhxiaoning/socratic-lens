@@ -4,6 +4,8 @@
  * 让教师每轮只看当前窗口，节省 context。
  */
 
+import { fuzzyKey } from "./citations";
+
 export type Page = {
   page: number;
   chars: number;
@@ -149,4 +151,29 @@ export function slideWindow(
   if (newStart === cur.startPage && newEnd === cur.endPage) return null;
 
   return { startPage: newStart, endPage: newEnd };
+}
+
+// ============================================================================
+// 知识点归页（自适应翻页的覆盖度驱动信号，见 _dev/WINDOW-SLIDE-REDESIGN.md §4.2 / §6.2.1）
+// ============================================================================
+
+/**
+ * 把一条清单项的 sourceQuote 归到它出现的**哪几页**（允许多页归属）。
+ *
+ * 用 fuzzyKey 做双向子串模糊匹配（与 coverage-tracker 同口径）——因为 sourceQuote
+ * 常是 LLM 归纳句，未必逐字落在正文。命中即算该页。
+ *
+ * 返回命中的 page 号数组（升序）。一个都没命中 → 空数组（该项无法定位，
+ * 排除出翻页判断，但仍参与展示与审计）。
+ */
+export function locateQuotePages(pages: Page[], sourceQuote: string): number[] {
+  const q = fuzzyKey(sourceQuote);
+  if (q.length === 0) return [];
+  const hits: number[] = [];
+  for (const p of pages) {
+    const key = fuzzyKey(p.text);
+    if (key.length === 0) continue;
+    if (key.includes(q) || q.includes(key)) hits.push(p.page);
+  }
+  return hits;
 }
