@@ -52,9 +52,12 @@ app/
   api/sessions/[sid]/route.ts       GET 单条会话 meta + transcript + 双教练 + usage + citations
   api/audits/route.ts               POST { sids, dimension } 跨会话跑审计（SSE）/ GET ?bookSlug 审计历史
   api/audits/[aid]/route.ts         GET 单次审计的 meta + 报告
+  api/config/route.ts               GET 回显运行时连接配置（key 打码）/ POST 保存或测试连接
+  api/health/route.ts               GET 连接是否配齐（页面加载时探测，未配齐弹引导）
 
 lib/
   llm.ts       唯一 callLLM / callLLMWithTool 入口（含 jsonMode / tool calling / usage 回调 / DeepSeek thinking 关闭）
+  config.ts    运行时连接配置层（data/config.json 覆盖 env）：resolveConnection/resolveModel/resolvePrice + 健康检查
   pricing.ts   按 .env 价格把 token 用量换算人民币
   book.ts      Book/Section 读取 + 每节字数统计 + 分页缓存
   parse-book.ts 纯函数：整本 md 按节切分（前端预览 + 后端落盘共用，无 node 依赖）
@@ -76,7 +79,7 @@ lib/
 components/    page.tsx 拆出的 UI + useSession hook
   useSession.ts（整套会话/批量/审计/覆盖度状态与副作用）· types.ts（共享类型）
   Controls.tsx · ChatView.tsx · CoachSidebar.tsx · CoverageSidebar.tsx
-  AuditPanel.tsx · HistoryDrawer.tsx · UploadBook.tsx · Modal.tsx · Field.tsx
+  AuditPanel.tsx · HistoryDrawer.tsx · UploadBook.tsx · ConnectionSettings.tsx · Modal.tsx · Field.tsx（含 Help 帮助气泡）
 
 prompts/
   teacher_rules.md
@@ -128,7 +131,8 @@ _dev/           内部开发文档（设计笔记、测试、其他书、旧 pro
 ```bash
 # 首次
 npm install
-cp .env.example .env.local  # 填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（+ 可选 LLM_MODEL_<PURPOSE> 分模型 + 价格变量）
+# 连接配置推荐直接在页面右上角「连接设置」里填（写到 data/config.json，优先级高于 env）。
+# 也可走环境变量：cp .env.example .env.local 后填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（+ 可选分模型 + 价格变量）
 
 # 开发（不用 pnpm dev——pnpm 严格模式会因 sharp 的 build script 报错）
 npx next dev               # http://localhost:3000，端口被占自动跳 3001/3002…

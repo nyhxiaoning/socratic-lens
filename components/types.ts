@@ -20,15 +20,15 @@ export type CoverageStats = {
 };
 
 export const LEARNERS: { id: LearnerId; label: string; desc: string }[] = [
-  { id: "passive", label: "冷淡型", desc: "问一句答一句，不主动提问，回复极短" },
-  { id: "moderate", label: "适度型", desc: "正常互动，不懂就问，中等篇幅" },
-  { id: "active", label: "话痨型", desc: "热情高话多，主动追问联想，容易跑题" },
+  { id: "passive", label: "冷淡（问一句答一句）", desc: "不主动提问，回复极短。用来看书在最省力的学生身上还能不能讲清。" },
+  { id: "moderate", label: "适度（正常互动）", desc: "不懂就问，中等篇幅。最接近普通学生。" },
+  { id: "active", label: "话痨（追问联想）", desc: "热情话多，主动追问、容易跑题。用来压力测试书的边界。" },
 ];
 
 export const PACINGS: { id: Pacing; label: string; desc: string }[] = [
-  { id: "thorough", label: "细", desc: "拆到最细，多复述多例子" },
-  { id: "normal", label: "中", desc: "正常节奏，每 2-3 轮复述一次" },
-  { id: "express", label: "快", desc: "跳过基础，直奔核心" },
+  { id: "thorough", label: "细讲（拆到最细）", desc: "拆到最细，多复述、多举例。适合难点密集的内容。" },
+  { id: "normal", label: "正常", desc: "常规节奏，每 2-3 轮复述一次。" },
+  { id: "express", label: "快讲（直奔核心）", desc: "跳过基础，直奔核心。适合快速预习/复习。" },
 ];
 
 export type CoachAnalysis = {
@@ -108,6 +108,7 @@ export type SessionListItem = {
   status: string;
   maxTurns?: number;
   turnsSoFar?: number;
+  pacing?: Pacing;
 };
 
 export type SessionEvent =
@@ -182,9 +183,45 @@ export const SECTION_LABELS: Record<string, string> = {
   // 教学覆盖度维度（复用 fidelity 标签，report 是纯 markdown 无 ===TAG===）
 };
 
-export const AUDIT_DIMENSIONS: { id: AuditDimension; label: string; desc: string }[] = [
-  { id: "book", label: "书质量", desc: "审这本书讲得清不清，产出面向更新造书流程" },
-  { id: "teacher", label: "教师教学质量", desc: "审教师照约束教得对不对，产出面向更新教师约束" },
-  { id: "fidelity", label: "保真度", desc: "审合成节有没有丢/歪源材料的教学目标、知识点、原题" },
-  { id: "coverage", label: "教学覆盖度", desc: "审教师对话里有没有覆盖源材料/书本的所有知识点" },
+export const AUDIT_DIMENSIONS: {
+  id: AuditDimension;
+  label: string;
+  desc: string;
+  /** basic=主动线常用；advanced=需要额外前提，收进「高级」 */
+  tier: "basic" | "advanced";
+  /** 一句话讲「能看出什么」 */
+  outcome: string;
+  /** 前提条件说明（没有前提就为空） */
+  requires?: string;
+}[] = [
+  {
+    id: "book",
+    label: "审书",
+    desc: "审这本书讲得清不清，产出面向更新造书流程",
+    tier: "basic",
+    outcome: "看出书里哪些地方表达不清、哪些是学生真卡住的点、教师讲的和原文有没有出入。",
+  },
+  {
+    id: "teacher",
+    label: "审教学",
+    desc: "审教师照约束教得对不对，产出面向更新教师约束",
+    tier: "basic",
+    outcome: "看出教师的苏格拉底提问执行得好不好、有没有违反铁律、适不适配学生和节奏。",
+  },
+  {
+    id: "coverage",
+    label: "教学覆盖度",
+    desc: "审教师对话里有没有覆盖源材料/书本的所有知识点",
+    tier: "advanced",
+    outcome: "看出对话里到底覆盖了多少知识点、哪些漏讲了。",
+    requires: "需要先为该节生成「知识点清单」（面板里可一键生成）。",
+  },
+  {
+    id: "fidelity",
+    label: "保真度",
+    desc: "审合成节有没有丢/歪源材料的教学目标、知识点、原题",
+    tier: "advanced",
+    outcome: "看出合成的书相对源材料，有没有丢失或改歪教学目标、知识点、原题。",
+    requires: "需要在 data/fidelity-samples/ 下准备「源材料 + 合成节」样本。",
+  },
 ];

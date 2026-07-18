@@ -54,6 +54,7 @@ export function CoachSidebar({
   if (!visible) return null;
   return (
     <aside
+      className="side-panel"
       style={{
         overflowY: "auto",
         padding: 12,

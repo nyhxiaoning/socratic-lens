@@ -16,7 +16,7 @@
 
 ## 输出格式
 
-每行一条，使用固定格式（不要 JSON、不要 markdown 表格、不要 ``` 围栏）：
+每行一条，使用固定格式（不要 JSON、不要 markdown 表格、不要 ``` 围栏）。若本次以函数/工具形式调用，请忽略此行格式约束，直接按函数 schema 输出：
 
 ```
 ROW|checklistId|category|itemName|status|synthQuote|note
@@ -41,3 +41,4 @@ VERDICT|一句话总评
 - 拿不准落地与否时，倾向 **dropped**——审计宁可多报漏，不可漏报漏。
 - 严格按 ROW|... 格式输出，每行一条，清单里每一条都必须出现一次。
 - category 取值：knowledgePoint / criteria / exercise / errorSpot（与清单条目对应）。
+

@@ -82,8 +82,13 @@ export function useSession() {
   const [sid, setSid] = useState<string>("");
   const [turnsSoFar, setTurnsSoFar] = useState<number>(0);
   const [error, setError] = useState<string>("");
+  // 通知类信息（如"正在生成知识点清单…"），与错误分开——不会渲染成红框。
+  const [notice, setNotice] = useState<string>("");
   const [modalSection, setModalSection] = useState<{ id: string; text: string } | null>(null);
   const [showUpload, setShowUpload] = useState<boolean>(false);
+  // 连接设置
+  const [showConfig, setShowConfig] = useState<boolean>(false);
+  const [health, setHealth] = useState<{ configured: boolean; source: string } | null>(null);
 
   // 审计
   const [auditText, setAuditText] = useState<string>("");
@@ -93,6 +98,9 @@ export function useSession() {
   const [pickedSids, setPickedSids] = useState<Set<string>>(new Set());
   const [auditDimension, setAuditDimension] = useState<AuditDimension>("book");
   const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
+  const [lastAuditParams, setLastAuditParams] = useState<{ sids: string[]; dimension: AuditDimension; sampleName?: string } | null>(null);
+  const [auditError, setAuditError] = useState<string>();
+  const [currentAuditId, setCurrentAuditId] = useState<string>("");
 
   // 知识点清单缓存
   const [checklistStatus, setChecklistStatus] = useState<Record<string, { exists: boolean; itemCount?: number }>>({});
@@ -115,6 +123,22 @@ export function useSession() {
         if (d.books?.[0]) setBookSlug(d.books[0].slug);
       })
       .catch((e) => setError(String(e)));
+  }, []);
+
+  /** 拉一次连接健康状态（页面加载 + 保存配置后）。 */
+  async function refreshHealth() {
+    try {
+      const r = await fetch("/api/health");
+      const d = await r.json();
+      setHealth({ configured: Boolean(d.configured), source: d.source ?? "none" });
+      // 没配齐就自动打开设置面板，省得用户在"开始"里撞墙
+      if (!d.configured) setShowConfig(true);
+    } catch {
+      setHealth(null);
+    }
+  }
+  useEffect(() => {
+    void refreshHealth();
   }, []);
 
   /** 重新拉书列表；可选传 selectSlug 拉完后选中它（上传成功后用）。 */
@@ -192,10 +216,18 @@ export function useSession() {
       setCoverageItems(items);
       const total = items.length;
       const covered = items.filter((i) => i.status === "covered").length;
-      const byCategory = new Map<string, { total: number; covered: number }>();
-      for (const cat of ["knowledgePoint", "criteria", "exercise", "errorSpot"]) {
+      const byCategory = {
+        knowledgePoint: { total: 0, covered: 0 },
+        criteria: { total: 0, covered: 0 },
+        exercise: { total: 0, covered: 0 },
+        errorSpot: { total: 0, covered: 0 },
+      } as CoverageStats["byCategory"];
+      for (const cat of ["knowledgePoint", "criteria", "exercise", "errorSpot"] as const) {
         const catItems = items.filter((i) => i.category === cat);
-        byCategory.set(cat, { total: catItems.length, covered: catItems.filter((i) => i.status === "covered").length });
+        byCategory[cat] = {
+          total: catItems.length,
+          covered: catItems.filter((i) => i.status === "covered").length,
+        };
       }
       setCoverageStats({ total, covered, byCategory });
     } else {
@@ -208,6 +240,7 @@ export function useSession() {
   async function loadSessionIntoView(sidToLoad: string) {
     setError("");
     setAuditText("");
+    setCurrentAuditId("");
     setShowAuditPanel(false);
     try {
       const r = await fetch(`/api/sessions/${sidToLoad}`);
@@ -304,6 +337,7 @@ export function useSession() {
     setSid("");
     setTurnsSoFar(0);
     setAuditText("");
+    setCurrentAuditId("");
     setShowAuditPanel(false);
     setWindowInfo(null);
     // resume 时不清理覆盖状态——后端会重放历史轮次并通过 coverage_init 推送累积状态
@@ -321,7 +355,7 @@ export function useSession() {
           (c: { sectionId: string; exists: boolean }) => c.sectionId === sectionId,
         );
         if (!cached?.exists) {
-          setError("正在生成知识点清单…");
+          setNotice("正在生成知识点清单（用于实时覆盖度标注）…");
           const gr = await fetch("/api/checklists", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -336,11 +370,11 @@ export function useSession() {
               [sectionId]: { exists: true, itemCount: gd.itemCount ?? 0 },
             }));
           }
-          setError("");
+          setNotice("");
         }
       } catch (e) {
         console.warn("知识点清单预检失败:", e);
-        setError("");
+        setNotice("");
       }
     }
 
@@ -376,7 +410,10 @@ export function useSession() {
       if (!resp.ok || !resp.body) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
       await readSse<SessionEvent>(resp, handleEvent);
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setError((e as Error).message);
+      if ((e as Error).name !== "AbortError") {
+        setAuditError((e as Error).message);
+        setAuditText("⚠️ 审计失败：" + (e as Error).message);
+      }
     } finally {
       setRunning(false);
       abortRef.current = null;
@@ -507,7 +544,6 @@ export function useSession() {
 
   async function openAuditPanel() {
     setShowAuditPanel(true);
-    setAuditText("");
     setPickedSids(sid ? new Set([sid]) : new Set());
     if (!bookSlug) return;
     try {
@@ -577,6 +613,8 @@ export function useSession() {
     setAuditText("");
     setAuditing(true);
     setError("");
+    setAuditError("");
+    setCurrentAuditId("");
     const ctrl = new AbortController();
     auditAbortRef.current = ctrl;
     try {
@@ -599,8 +637,23 @@ export function useSession() {
           queueMicrotask(() => auditRef.current?.scrollTo({ top: auditRef.current.scrollHeight }));
         } else if (ev.type === "audit_done") {
           setAuditText(ev.report.raw);
+          setCurrentAuditId(ev.aid);
+          setAuditHistory((prev) => {
+            const newItem: AuditHistoryItem = {
+              aid: ev.aid,
+              dimension,
+              bookSlug: bookSlug ?? "",
+              sectionIds: [],
+              sidCount: sids.length,
+              verdict: ev.report.raw?.slice(0, 60).replace(/\n.*/, "") ?? "",
+              ts: Date.now(),
+            };
+            const exists = prev.some((h) => h.aid === ev.aid);
+            return exists ? prev : [...prev, newItem];
+          });
         } else if (ev.type === "audit_error") {
-          setError(ev.message);
+          setAuditError(ev.message);
+          setAuditText("⚠️ 审计失败：" + ev.message);
         }
       });
     } catch (e) {
@@ -621,6 +674,7 @@ export function useSession() {
       if (d.report?.raw) {
         setAuditDimension((d.meta?.dimension as AuditDimension) ?? "book");
         setAuditText(d.report.raw);
+        setCurrentAuditId(d.meta?.aid ?? aid);
       } else {
         setError(d.error || "审计不存在");
       }
@@ -629,13 +683,25 @@ export function useSession() {
     }
   }
 
+  /** 主动收起当前审计报告（不影响已落盘的报告）。 */
+  function closeAudit() {
+    setAuditText("");
+    setCurrentAuditId("");
+    setAuditError("");
+  }
+
   function stopAudit() {
     auditAbortRef.current?.abort();
   }
 
   function reopenAudit() {
-    setAuditText("");
+    setAuditError("");
     setShowAuditPanel(true);
+  }
+
+  function retryLastAudit() {
+    if (!lastAuditParams) return;
+    runAudit(lastAuditParams.sids, lastAuditParams.dimension, lastAuditParams.sampleName);
   }
 
   async function openSection(id: string) {
@@ -671,11 +737,14 @@ export function useSession() {
     selectedPacings, togglePacing, batchRuns, batchRunning, runBatch,
     // 对话
     messages, coachHistory, learnerCoachHistory, citations, usage, windowInfo,
-    running, sid, turnsSoFar, error, scrollRef,
+    running, sid, turnsSoFar, error, notice, scrollRef,
+    // 连接设置 / 健康
+    showConfig, setShowConfig, health, refreshHealth,
     // 审计
     auditText, auditing, showAuditPanel, setShowAuditPanel, existingSessions,
     pickedSids, togglePick, auditRef,
-    auditDimension, setAuditDimension, auditHistory, viewAudit,
+    auditDimension, setAuditDimension, auditHistory, viewAudit, auditError, retryLastAudit,
+    currentAuditId, closeAudit,
     // 知识点清单缓存 + 实时覆盖度
     checklistStatus, generatingSections, generateChecklist,
     coverageItems, coverageStats,

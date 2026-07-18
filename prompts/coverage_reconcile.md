@@ -47,14 +47,14 @@
 
 ## 输出格式
 
-**每行一条**，用以下固定格式（不要用 JSON——直接按行输出）：
+**每行一条**，用以下固定格式（不要用 JSON——直接按行输出）。若本次以函数/工具形式调用，请忽略此行格式约束，直接按函数 schema 输出：
 
 ```
 ROW|checklistId|category|itemName|status|synthQuote|note
 ```
 
 字段说明：
-- `checklistId`：清单条目 id（如 kp1、cr3）
+- `checklistId`：清单条目 id（如 kp1、ac3）
 - `category`：knowledgePoint / criteria / exercise / errorSpot
 - `itemName`：清单条目名称
 - `status`：landed / morphed / dropped
@@ -73,3 +73,4 @@ VERDICT|一句话总评（应提及节奏档位和对应期望）
 - **严格按 ROW|...|VERDICT|... 格式输出**，每行一条，不输出其他内容。
 - 清单里每一条都必须在输出里出现一次。
 - 不要输出 markdown 表格、不要 JSON、不要 ``` 代码围栏。
+

@@ -17,6 +17,34 @@ type Props = {
 export function CoverageSidebar({ visible, items, stats, onCollapse }: Props) {
   if (!visible) return null;
 
+  if (items.length === 0) {
+    return (
+      <div
+        className="side-panel"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          background: "var(--panel)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          padding: 12,
+          fontSize: 13,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <span style={{ fontWeight: 600 }}>知识点覆盖</span>
+          <button onClick={onCollapse} style={{ fontSize: 11, padding: "2px 8px" }}>收起</button>
+        </div>
+        <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.7, marginTop: 12 }}>
+          开始跑课后，这里会实时标注教师讲到了哪些知识点、还漏了哪些。
+          <br />
+          （首次会自动为本节生成知识点清单，稍等片刻。）
+        </div>
+      </div>
+    );
+  }
+
   const grouped = new Map<string, CoverageItem[]>();
   for (const item of items) {
     if (!grouped.has(item.category)) grouped.set(item.category, []);
@@ -27,6 +55,7 @@ export function CoverageSidebar({ visible, items, stats, onCollapse }: Props) {
 
   return (
     <div
+      className="side-panel"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -111,7 +140,7 @@ export function CoverageSidebar({ visible, items, stats, onCollapse }: Props) {
                 </span>
                 <span
                   style={{
-                    color: item.status === "covered" ? "var(--fg)" : "var(--muted)",
+                    color: item.status === "covered" ? "var(--text)" : "var(--muted)",
                     lineHeight: 1.4,
                   }}
                 >
@@ -131,3 +160,4 @@ export function CoverageSidebar({ visible, items, stats, onCollapse }: Props) {
     </div>
   );
 }
+

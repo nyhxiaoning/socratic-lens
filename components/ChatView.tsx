@@ -27,8 +27,16 @@ export const ChatView = forwardRef<HTMLDivElement, ChatViewProps>(function ChatV
       }}
     >
       {messages.length === 0 && !running && (
-        <div style={{ color: "var(--muted)", textAlign: "center", padding: 40 }}>
-          选好书、节和学生档位，点"开始"。教师说完一轮学生跟上{maxTurns === 0 ? "，直到本节结束" : `，共 ${maxTurns} 轮`}。
+        <div style={{ color: "var(--muted)", textAlign: "center", padding: "48px 24px", lineHeight: 1.9 }}>
+          <div style={{ fontSize: 15, color: "var(--text)", marginBottom: 8 }}>还没有对话</div>
+          <div>
+            上方选好书、节、学生类型，点「开始」。
+            <br />
+            教师说完一轮，学生跟一轮{maxTurns === 0 ? "，直到本节讲完" : `，共 ${maxTurns} 轮`}。
+          </div>
+          <div style={{ fontSize: 12, marginTop: 10, opacity: 0.8 }}>
+            学生看不到原文，只能从老师的话里学——它问不出来、老师讲不到的，就是书要补的地方。
+          </div>
         </div>
       )}
       {messages.map((m, i) => (

@@ -462,14 +462,26 @@ export async function* runCoverageAudit(
     await writeAtomic(path.join(auditDir(aid), "meta.json"), JSON.stringify(meta, null, 2));
     yield { type: "audit_start", aid, dimension: "coverage", sids, sampleName };
 
-    // 取第一个会话确定 bookSlug + sectionId + pacing
-    const sid = sids[0];
-    const sm = await readJson<SessionMeta>(sessionMetaPath(sid));
-    const pacing = sm.pacing ?? "normal";
-    const book = await getBook(sm.bookSlug);
-    meta.bookSlug = sm.bookSlug;
-    meta.sectionIds = [sm.sectionId];
-    const sectionTitle = getSectionTitle(book, sm.sectionId);
+    // 加载所有会话的 meta，校验同书同节
+    const metas: SessionMeta[] = [];
+    for (const sid of sids) {
+      if (!(await exists(sessionMetaPath(sid)))) {
+        throw new Error(`会话 ${sid} 不存在`);
+      }
+      metas.push(await readJson<SessionMeta>(sessionMetaPath(sid)));
+    }
+    const bookSlug = metas[0].bookSlug;
+    for (const m of metas) {
+      if (m.bookSlug !== bookSlug) throw new Error(`选中的会话分属不同书，不支持`);
+    }
+    const sectionIds = [...new Set(metas.map((m) => m.sectionId))];
+    if (sectionIds.length > 1) throw new Error(`覆盖度审计不支持跨节合审（${sectionIds.join(", ")}）`);
+    const sectionId = sectionIds[0];
+    const pacing = metas[0].pacing ?? "normal";
+    meta.bookSlug = bookSlug;
+    meta.sectionIds = sectionIds;
+    const book = await getBook(bookSlug);
+    const sectionTitle = getSectionTitle(book, sectionId);
 
     // 确定知识来源
     let sourceText: string;
@@ -479,12 +491,12 @@ export async function* runCoverageAudit(
       sourceText = await fs.readFile(srcPath, "utf-8");
       sourceLabel = `源材料「${sampleName}」`;
     } else {
-      sourceText = await getSection(sm.bookSlug, sm.sectionId);
-      sourceLabel = `书本原文「${book.title}」§${sm.sectionId} ${sectionTitle}（AI 从节中推断，非外部源材料）`;
+      sourceText = await getSection(bookSlug, sectionId);
+      sourceLabel = `书本原文「${book.title}」§${sectionId} ${sectionTitle}（AI 从节中推断，非外部源材料）`;
     }
 
     // 1. 提取清单（优先读缓存，没有再在线提取）
-    let checklist = await getChecklist(sm.bookSlug, sm.sectionId);
+    let checklist = await getChecklist(bookSlug, sectionId);
     if (checklist) {
       yield { type: "audit_chunk", text: `  使用已缓存的知识点清单。\n\n` };
     } else {
@@ -497,20 +509,35 @@ export async function* runCoverageAudit(
       checklist.assessmentCriteria.length +
       checklist.exercises.length +
       checklist.errorSpots.length;
-    yield { type: "audit_chunk", text: `  提取到 ${totalItems} 条。\n\n  加载会话 ${sid}……\n\n` };
+    yield { type: "audit_chunk", text: `  提取到 ${totalItems} 条。\n\n  \n\n` };
 
-    // 2. 加载并格式化对话
-    const turns = await loadTurns(sid, sm.turnsSoFar);
-    if (turns.length === 0) throw new Error("所选会话没有对话记录");
-    const transcriptText = formatTranscript(turns);
-    const transcriptInfo = `  对话共 ${turns.length} 轮（${Math.round(transcriptText.length / 100) * 100}+ 字符）。\n\n  正在勾稽「${sectionTitle}」的教学覆盖度……\n\n`;
-    yield { type: "audit_chunk", text: transcriptInfo };
+    // 2. 加载并格式化所有会话的对话
+    const allTranscriptParts: string[] = [];
+    let totalTurns = 0;
+    for (const m of metas) {
+      const turns = await loadTurns(m.sid, m.turnsSoFar);
+      if (turns.length === 0) {
+        yield { type: "audit_chunk", text: `  会话 ${m.sid} 无对话记录，跳过。\n` };
+        continue;
+      }
+      totalTurns += turns.length;
+      const learnerLabel = LEARNER_LABEL[m.learnerId] ?? m.learnerId;
+      allTranscriptParts.push(`--- 会话 ${m.sid}（${learnerLabel}）---`);
+      allTranscriptParts.push(formatTranscript(turns));
+    }
+    if (allTranscriptParts.length === 0) throw new Error("所选会话均无对话记录");
+    const transcriptText = allTranscriptParts.join("\n\n");
+    yield { type: "audit_chunk", text: `  共加载 ${totalTurns} 轮对话（${metas.length} 个会话，${Math.round(transcriptText.length / 100) * 100}+ 字符）。\n\n  正在勾簿「${sectionTitle}」的教学覆盖度……\n\n` };
 
-    // 长对话截断（>16k 字符）
-    const MAX_TRANSCRIPT_CHARS = 16000;
-    const reconcileTranscript = transcriptText.length > MAX_TRANSCRIPT_CHARS
-      ? truncateTranscript(transcriptText)
-      : transcriptText;
+    // 安全网：>500k 字符才截断（DeepSeek 1M 上下文，实际对话不会达到）
+    const MAX_TRANSCRIPT_CHARS = 500000;
+    let reconcileTranscript = transcriptText;
+    let truncated = false;
+    if (transcriptText.length > MAX_TRANSCRIPT_CHARS) {
+      truncated = true;
+      reconcileTranscript = safetyNetTruncate(transcriptText);
+      yield { type: "audit_chunk", text: `  ⚠️ 对话过长（>${MAX_TRANSCRIPT_CHARS} 字符），已截断。\n\n` };
+    }
 
     // 3. 勾稽
     const { rows, verdict: llmVerdict } = await reconcileAgainstTranscript(checklist, reconcileTranscript, pacing, signal);
@@ -518,8 +545,8 @@ export async function* runCoverageAudit(
     const verdict = llmVerdict || deriveCoverageVerdict(coverage);
 
     // 4. 落盘
-    const reportMd = renderCoverageReportMd(rows, coverage, verdict, sourceLabel, pacing);
-    const reportJson = { rows, coverage, verdict, sourceLabel };
+    const reportMd = (truncated ? "⚠️ 本报告基于截断对话（完整对话 >500k 字符）。\n\n" : "") + renderCoverageReportMd(rows, coverage, verdict, sourceLabel, pacing);
+    const reportJson = { rows, coverage, verdict, sourceLabel, truncated };
     await writeAtomic(path.join(auditDir(aid), "report.md"), reportMd);
     await writeAtomic(path.join(auditDir(aid), "report.json"), JSON.stringify(reportJson, null, 2));
     await writeAtomic(path.join(auditDir(aid), "checklist.json"), JSON.stringify(checklist, null, 2));
@@ -533,10 +560,10 @@ export async function* runCoverageAudit(
       path.join(AUDITS_ROOT, "history.jsonl"),
       JSON.stringify({
         aid,
-        bookSlug: sm.bookSlug,
+        bookSlug,
         dimension: "coverage",
-        sectionIds: [sm.sectionId],
-        sidCount: 1,
+        sectionIds: sectionIds,
+        sidCount: sids.length,
         verdict,
         ts: Date.now(),
       }),
@@ -554,22 +581,23 @@ export async function* runCoverageAudit(
   }
 }
 
-/** 长对话截断：保留前 2 轮 + 最近 8 轮 + 中间省略标记。 */
-function truncateTranscript(text: string): string {
+/** 安全网截断：只在 >500k 字符时触发，保留前 20 轮 + 后 20 轮。 */
+function safetyNetTruncate(text: string): string  {
   const lines = text.split("\n");
   const turnStarts: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (/^【(教师|学生)】/.test(lines[i])) turnStarts.push(i);
+    if (/^[【(教师|学生)】]/.test(lines[i])) turnStarts.push(i);
   }
-  if (turnStarts.length <= 12) return text;
+  const KEEP_HEAD = 40; // 20 轮（教师+学生各 20 行）
+  const KEEP_TAIL = 40;
+  if (turnStarts.length <= KEEP_HEAD + KEEP_TAIL) return text;
 
-  const firstEnd = turnStarts[Math.min(3, turnStarts.length - 9)];
-  const lastStart = turnStarts[Math.max(turnStarts.length - 8, 0)];
+  const firstEnd = turnStarts[Math.min(KEEP_HEAD - 1, turnStarts.length - KEEP_TAIL - 1)];
+  const lastStart = turnStarts[Math.max(turnStarts.length - KEEP_TAIL, 0)];
 
   const head = lines.slice(0, firstEnd).join("\n");
   const tail = lines.slice(lastStart).join("\n");
-  const omitted = Math.round((lastStart - firstEnd) / 2);
-  return `${head}\n\n...（中间 ${omitted} 轮对话已省略，保留前 2 轮 + 最近 8 轮）...\n\n${tail}`;
+  return `${head}\n\n...（中间对话已省略，保留前 20 轮 + 后 20 轮）...\n\n${tail}`;
 }
 
 /**
